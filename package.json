@@ -1,0 +1,28 @@
+{
+  "name": "agent-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "从零构建的 Agent 骨架 —— 工程底座优先（超时 / 沙箱 / 测试）",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^11.10.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=8.0.0",
+    "npm": "please-use-pnpm",
+    "yarn": "please-use-pnpm"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}
