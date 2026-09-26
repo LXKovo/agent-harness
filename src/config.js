@@ -57,4 +57,7 @@ export const config = {
 
   /** 单条命令返回给模型的最大字符数（超出截断，避免一次输出撑爆上下文） */
   maxOutputChars: parseInt(process.env.MAX_OUTPUT_CHARS) || 8_000,
+
+  /** write_file 单次可写入的最大字符数 */
+  maxWriteChars: parseInt(process.env.MAX_WRITE_CHARS) || 100_000,
 };

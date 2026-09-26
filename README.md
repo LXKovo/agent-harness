@@ -30,7 +30,7 @@
 - [x] `src/tools/registry.js` — 工具注册表 + 结果处理器路由
 - [x] `src/tools/execCommand.js` — 沙箱约束 + 超时杀进程树 + 捕获 stdout/stderr
 - [ ] LLM 接入与 ReAct 循环
-- [ ] 文件类工具（read_file / write_file / list_directory）
+- [x] 文件类工具（read_file / write_file / list_directory）
 - [ ] 会话内记忆 → 跨会话记忆
 - [ ] RAG 检索接入
 - [ ] 子 agent（subagent）
@@ -76,9 +76,14 @@ src/
 └── tools/
     ├── registry.js        # 工具注册 + 结果处理器路由
     ├── execCommand.js     # 命令执行（沙箱 + 超时 + 捕获输出）
+    ├── filePaths.js       # 文件工具真实路径边界
+    ├── readFile.js        # 读取文本文件
+    ├── listDirectory.js   # 列出目录
+    ├── writeFile.js       # 创建或覆盖文本文件
     └── index.js           # 内置工具组装
 test/
 ├── sandbox.test.js
 ├── timeout.test.js
-└── execCommand.test.js
+├── execCommand.test.js
+└── fileTools.test.js
 ```

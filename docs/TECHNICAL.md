@@ -34,6 +34,10 @@ agent-harness/
 │   ├── tools/
 │   │   ├── registry.js        ✅ 工具注册表 + 结果处理器路由
 │   │   ├── execCommand.js     ✅ 命令执行（沙箱 + 超时 + 捕获输出）
+│   │   ├── filePaths.js       ✅ 文件工具的真实路径边界
+│   │   ├── readFile.js        ✅ 读取 UTF-8 文本
+│   │   ├── listDirectory.js   ✅ 列出目录直接子项
+│   │   ├── writeFile.js       ✅ 创建或明确覆盖文本文件
 │   │   └── index.js           ✅ 内置工具组装
 │   ├── agent/                 ⬜ (M1) ReAct 主循环
 │   ├── memory/                ⬜ (M2) 会话内 / 跨会话记忆
@@ -43,7 +47,8 @@ agent-harness/
 ├── test/
 │   ├── sandbox.test.js        ✅
 │   ├── timeout.test.js        ✅
-│   └── execCommand.test.js    ✅
+│   ├── execCommand.test.js    ✅
+│   └── fileTools.test.js      ✅
 ├── docs/                      ← 本目录
 │   ├── GOALS.md
 │   ├── TECHNICAL.md
@@ -119,8 +124,8 @@ registry.invoke(name, args)
         │     ├─ 1. sandbox.resolveInWorkspace(cwd)   越界 → 返回「命令未执行 —— ...」
         │     ├─ 2. resolveTimeoutMs(timeout, 上限)   封顶
         │     ├─ 3. spawn(command, { shell, pipe })
-        │     ├─ 4. 累积 stdout/stderr（切片截断 + 实时透传终端）
-        │     ├─ 5. 超时 → killTree
+        │     ├─ 4. 累积 stdout/stderr（切片截断）
+        │     ├─ 5. 超时 → killTree，检查终止结果；失败时返回错误
         │     └─ 6. formatResult → 字符串
         │
         └─ 任何异常 ─────→ 「工具 "x" 执行出错: ...」
@@ -134,6 +139,8 @@ registry.invoke(name, args)
 
 **关键点**：`invoke` 的返回类型永远是 `string`。
 所有失败路径（找不到工具、参数错、执行错）都汇成字符串，这样 Agent 循环里不需要写 try/catch。
+
+文件工具同样通过注册表调用。读取和列目录会校验目标的真实路径；写入会校验父目录的真实路径，默认拒绝覆盖，显式覆盖时先写临时文件再替换。读取、列目录和写入都设有长度上限。
 
 ### 4.2 ReAct 主循环（M1 规划）
 
@@ -163,7 +170,8 @@ loop（最多 maxIterations 次）：
 | `SHELL_PATH` | 自动探测 Git Bash，找不到则用系统默认 shell | 命令执行使用的 shell |
 | `COMMAND_TIMEOUT` | `30000` | 单条命令默认超时（毫秒） |
 | `MAX_COMMAND_TIMEOUT` | `600000` | 模型可指定的超时上限（毫秒），**必须封顶** |
-| `MAX_OUTPUT_CHARS` | `8000` | 单条命令返回给模型的最大字符数 |
+| `MAX_OUTPUT_CHARS` | `8000` | 命令、读文件与列目录返回内容的最大字符数 |
+| `MAX_WRITE_CHARS` | `100000` | 单次写入文本的最大字符数 |
 
 上限的取值理由与约束见 [CONSTRAINTS.md](./CONSTRAINTS.md) § 5。
 
@@ -183,7 +191,7 @@ pnpm test:watch    # 监听模式
 node --test test/sandbox.test.js
 ```
 
-**手动验证超时确实杀掉了进程**（测试只能断言「迅速返回」，断言不了「进程已死」）：
+**手动验证超时确实杀掉了进程**（测试断言迅速返回，仍需手动检查残留进程）：
 
 ```powershell
 node -e "
@@ -215,9 +223,13 @@ import('./src/tools/execCommand.js').then(async (m) => {
 | `src/safety/timeout.js` | 通用超时 | `withTimeout` / `TimeoutError` |
 | `src/tools/registry.js` | 工具注册与路由 | `ToolRegistry` 类 |
 | `src/tools/execCommand.js` | 命令执行 | `createExecCommandTool` / `resolveTimeoutMs` |
+| `src/tools/filePaths.js` | 文件工具真实路径边界 | `resolveExistingPath` / `resolveWritePath` |
+| `src/tools/readFile.js` | 读取文本 | `createReadFileTool` |
+| `src/tools/listDirectory.js` | 列出目录 | `createListDirectoryTool` |
+| `src/tools/writeFile.js` | 写入文本 | `createWriteFileTool` |
 | `src/tools/index.js` | 工具组装 | `createToolRegistry` |
 
-测试覆盖：26 个用例，分布为 sandbox 10 / timeout 5 / execCommand 11。
+测试覆盖：35 个用例，分布为 sandbox 10 / timeout 5 / execCommand 13 / fileTools 7。
 
 ---
 

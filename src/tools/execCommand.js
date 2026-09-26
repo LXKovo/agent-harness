@@ -15,13 +15,54 @@ import { resolveInWorkspace, SandboxError } from '../safety/sandbox.js';
  */
 function killTree(child) {
   if (child.exitCode !== null || child.signalCode !== null) {
-    return;
+    return Promise.resolve({ ok: true });
   }
 
   if (process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' });
-  } else {
-    child.kill('SIGKILL');
+    return new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let errorOutput = Buffer.alloc(0);
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        killer.kill();
+        killer.stderr.destroy();
+        killer.unref();
+        finish({ ok: false, error: 'taskkill 超时' });
+      }, 5000);
+
+      killer.stderr.on('data', (chunk) => {
+        errorOutput = Buffer.concat([errorOutput, chunk.subarray(0, 1000 - errorOutput.length)]);
+      });
+      killer.on('error', (err) => finish({ ok: false, error: err.message }));
+      killer.on('close', (code) => {
+        if (code === 0) return finish({ ok: true });
+        let detail;
+        try {
+          detail = new TextDecoder('utf-8', { fatal: true }).decode(errorOutput);
+        } catch {
+          // 中文 Windows 的 taskkill 常用 GBK 输出，直接按 UTF-8 解码会乱码。
+          detail = new TextDecoder('gbk').decode(errorOutput);
+        }
+        finish({ ok: false, error: `taskkill 退出码 ${code}: ${detail.trim()}` });
+      });
+    });
+  }
+
+  try {
+    return Promise.resolve(child.kill('SIGKILL')
+      ? { ok: true }
+      : { ok: false, error: 'SIGKILL 未发送成功' });
+  } catch (err) {
+    return Promise.resolve({ ok: false, error: err.message });
   }
 }
 
@@ -46,7 +87,7 @@ export function resolveTimeoutMs(requested, { defaultTimeoutMs, maxTimeoutMs }) 
  * 于是模型执行 `ls` 后拿不到任何文件列表，只能靠猜。
  * Agent 要能干活，就必须让它看见命令的输出。
  */
-function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars }) {
+function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, terminateProcessTree }) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const child = spawn(command, {
@@ -61,6 +102,9 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars }) {
     let truncated = false;
     let timedOut = false;
     let settled = false;
+    let terminationPending = false;
+    let closeResult;
+    let closeTimer;
 
     const append = (current, chunk) => {
       if (current.length >= maxOutputChars) {
@@ -85,15 +129,11 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars }) {
     child.stdout.on('data', (chunk) => { stdout = append(stdout, chunk); });
     child.stderr.on('data', (chunk) => { stderr = append(stderr, chunk); });
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killTree(child);
-    }, timeoutMs);
-
     const finish = (extra) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(closeTimer);
       resolve({
         stdout,
         stderr,
@@ -104,13 +144,41 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars }) {
       });
     };
 
+    const releaseChild = () => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminationPending = true;
+      Promise.resolve().then(() => terminateProcessTree(child)).then((status) => {
+        terminationPending = false;
+        if (!status.ok) {
+          releaseChild();
+          finish({ ok: false, code: null, signal: null, terminationError: status.error });
+        } else if (closeResult) {
+          finish(closeResult);
+        } else {
+          // taskkill 成功后仍需等子进程关闭；不能无限等待失联的管道。
+          closeTimer = setTimeout(() => {
+            releaseChild();
+            finish({ ok: false, code: null, signal: null, terminationError: '未确认进程退出' });
+          }, 2000);
+        }
+      }).catch((err) => {
+        terminationPending = false;
+        releaseChild();
+        finish({ ok: false, code: null, signal: null, terminationError: err.message });
+      });
+    }, timeoutMs);
+
     child.on('error', (err) => finish({ ok: false, code: null, signal: null, error: err.message }));
-    child.on('close', (code, signal) => finish({
-      ok: !timedOut && code === 0,
-      code,
-      signal,
-      error: null,
-    }));
+    child.on('close', (code, signal) => {
+      closeResult = { ok: !timedOut && code === 0, code, signal, error: null };
+      if (!terminationPending) finish(closeResult);
+    });
   });
 }
 
@@ -121,7 +189,9 @@ function formatResult({ command, cwd, result, effectiveTimeoutMs, maxOutputChars
   const lines = [];
 
   if (result.timedOut) {
-    lines.push(`命令超时（${effectiveTimeoutMs}ms），已终止进程树: ${command}`);
+    lines.push(result.terminationError
+      ? `命令超时（${effectiveTimeoutMs}ms），终止进程失败: ${command} — ${result.terminationError}`
+      : `命令超时（${effectiveTimeoutMs}ms），已终止进程树: ${command}`);
   } else if (result.error) {
     lines.push(`命令无法启动: ${command} — ${result.error}`);
   } else if (result.ok) {
@@ -158,6 +228,7 @@ function formatResult({ command, cwd, result, effectiveTimeoutMs, maxOutputChars
  * @param {number} deps.defaultTimeoutMs
  * @param {number} deps.maxTimeoutMs
  * @param {number} deps.maxOutputChars
+ * @param {Function} [deps.terminateProcessTree] - 进程终止函数（供测试注入失败场景）
  */
 export function createExecCommandTool({
   workspaceRoot,
@@ -165,6 +236,7 @@ export function createExecCommandTool({
   defaultTimeoutMs,
   maxTimeoutMs,
   maxOutputChars,
+  terminateProcessTree = killTree,
 }) {
   return {
     name: 'exec_command',
@@ -204,6 +276,7 @@ export function createExecCommandTool({
         shell,
         timeoutMs: effectiveTimeoutMs,
         maxOutputChars,
+        terminateProcessTree,
       });
 
       return formatResult({ command, cwd: resolvedCwd, result, effectiveTimeoutMs, maxOutputChars });

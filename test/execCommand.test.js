@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { createExecCommandTool, resolveTimeoutMs } from '../src/tools/execCommand.js';
+import { createToolRegistry } from '../src/tools/index.js';
 import { config } from '../src/config.js';
 
 const tool = createExecCommandTool({
@@ -27,6 +28,14 @@ describe('resolveTimeoutMs（超时封顶）', () => {
 });
 
 describe('exec_command', () => {
+  test('注册表传入默认超时和上限', async () => {
+    const registry = createToolRegistry({ commandTimeoutMs: 1000, maxCommandTimeoutMs: 2000 });
+    const registeredTool = registry.get('exec_command');
+
+    assert.match(registeredTool.schema.shape.timeoutMs.description, /默认 1000，上限 2000/);
+    assert.match(await registry.invoke('exec_command', { command: 'echo ready' }), /命令执行成功/);
+  });
+
   test('成功命令：返回 stdout 给模型', async () => {
     const out = await tool.invoke({ command: 'echo hello-harness' });
     assert.match(out, /命令执行成功/);
@@ -58,6 +67,23 @@ describe('exec_command', () => {
     assert.match(out, /超时/);
     assert.match(out, /已终止进程树/);
     assert.ok(elapsed < 5000, `应在超时后迅速返回，实际耗时 ${elapsed}ms`);
+  });
+
+  test('终止进程失败时迅速返回真实错误，不谎报已终止', async () => {
+    const failingTool = createExecCommandTool({
+      ...config,
+      defaultTimeoutMs: 30,
+      maxTimeoutMs: 1000,
+      maxOutputChars: 2000,
+      terminateProcessTree: async () => ({ ok: false, error: 'Access denied' }),
+    });
+    const started = Date.now();
+    const out = await failingTool.invoke({ command: 'sleep 1' });
+
+    assert.match(out, /超时/);
+    assert.match(out, /终止进程失败.*Access denied/);
+    assert.doesNotMatch(out, /已终止进程树/);
+    assert.ok(Date.now() - started < 700, '终止失败时也应迅速返回');
   });
 
   test('cwd 越出工作区：拒绝执行，命令不会跑', async () => {

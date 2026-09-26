@@ -1,5 +1,8 @@
 import { ToolRegistry } from './registry.js';
 import { createExecCommandTool } from './execCommand.js';
+import { createReadFileTool } from './readFile.js';
+import { createListDirectoryTool } from './listDirectory.js';
+import { createWriteFileTool } from './writeFile.js';
 import { config } from '../config.js';
 
 /**
@@ -15,11 +18,23 @@ export function createToolRegistry(overrides = {}) {
   const settings = { ...config, ...overrides };
   const registry = new ToolRegistry();
 
-  registry.register(createExecCommandTool(settings), {
+  registry.register(createExecCommandTool({
+    ...settings,
+    defaultTimeoutMs: settings.commandTimeoutMs,
+    maxTimeoutMs: settings.maxCommandTimeoutMs,
+  }), {
     // 终端只显示首行（成功/失败/超时那行），完整输出留给模型
     summarize: (result) => result.split('\n')[0],
     compact: (result) => result,
   });
+
+  const fileProcessors = {
+    summarize: (result) => result.split('\n')[0],
+    compact: (result) => result,
+  };
+  registry.register(createReadFileTool(settings), fileProcessors);
+  registry.register(createListDirectoryTool(settings), fileProcessors);
+  registry.register(createWriteFileTool(settings), fileProcessors);
 
   return registry;
 }
