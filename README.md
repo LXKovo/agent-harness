@@ -1,89 +1,36 @@
 # agent-harness
 
-从零构建的 Agent 骨架。目标不是跑通一个 demo，而是做出**真正能用的 agent**。
+一个用于学习和验证 coding agent 基础结构的 Node.js 项目。当前仓库**只有工具层**：模型接入、Agent 运行循环和 CLI 尚未实现，因此现在还不能接收任务并自主完成它。
 
-## 文档
+## 当前能做什么
 
-- [目标文档](docs/GOALS.md) — 为什么做、做到什么程度算成功、明确不做什么
-- [技术文档](docs/TECHNICAL.md) — 技术栈、项目结构、模块依赖、核心数据流、常用命令
-- [设计文档](docs/DESIGN.md) — 关键设计决策：背景、取舍、被否决的方案、代价
-- [约束文档](docs/CONSTRAINTS.md) — 安全红线、能力边界、代码约定、资源预算
+| 工具 | 能力 | 主要边界 |
+|---|---|---|
+| `exec_command` | 执行 shell 命令，返回 stdout、stderr 和退出状态 | 限制工作目录、执行时间和返回长度；**不限制命令访问工作区外的资源** |
+| `read_file` | 读取 UTF-8 文本 | 检查真实路径，拒绝含 NUL 或无效 UTF-8 的内容，截断长内容 |
+| `list_directory` | 列出目录的直接子项 | 检查真实路径，限制列表长度 |
+| `write_file` | 写入 UTF-8 文本 | 检查父目录真实路径；默认拒绝覆盖，覆盖须显式指定；限制写入大小 |
 
-> 建议阅读顺序：GOALS → CONSTRAINTS → DESIGN → TECHNICAL。
-> 先知道「为什么」和「红线在哪」，再看决策依据，最后看实现细节。
+`src/safety/sandbox.js` 是**路径检查器**，不是进程沙箱。文件工具额外解析真实路径以拦截指向工作区外的链接；`exec_command` 仍通过 shell 运行任意命令。不要把当前工具集当作可在不可信环境中无人值守运行的隔离系统。详细边界见 [约束文档](docs/CONSTRAINTS.md)。
 
-## 为什么先做底座
+## 运行测试
 
-一个能跑的 ReAct 循环很好写，难的是让它**敢被交出去自己跑**。三个最容易漏掉的点：
-
-1. **超时** —— 没有它，一条 `sleep 999` 就能让 agent 永久挂住
-2. **沙箱** —— 没有它，模型生成的一个 `../` 就能写到工作区外
-3. **测试** —— 没有它，上面两条改一次就可能悄悄失效
-
-所以这个仓的第一批代码不是 Agent 循环，而是这三件事。事实也证明了这一点：本仓的第一个真实 bug（输出截断失效）就是测试抓出来的，而不是靠肉眼看代码发现的。
-
-## 当前进度
-
-- [x] 项目骨架（ESM + 内置 `node:test`，零测试框架依赖）
-- [x] `src/safety/sandbox.js` — 工作区路径边界
-- [x] `src/safety/timeout.js` — 通用超时包装
-- [x] `src/tools/registry.js` — 工具注册表 + 结果处理器路由
-- [x] `src/tools/execCommand.js` — 沙箱约束 + 超时杀进程树 + 捕获 stdout/stderr
-- [ ] LLM 接入与 ReAct 循环
-- [x] 文件类工具（read_file / write_file / list_directory）
-- [ ] 会话内记忆 → 跨会话记忆
-- [ ] RAG 检索接入
-- [ ] 子 agent（subagent）
-- [ ] 技能（skill）加载与选择
-
-## 三个设计决定
-
-### 1. 超时 ≠ 停止等待
-
-`Promise.race` 只是「不再等」，子进程仍然在后台占着 CPU 和端口。
-所以这里走的是 `setTimeout` + `killTree`：Windows 用 `taskkill /pid <pid> /t /f` 杀整棵进程树，
-POSIX 用 `SIGKILL`。少了这一半，"超时保护"就只是个假象。
-
-### 2. 命令输出必须回到模型手里
-
-用 `stdio: 'inherit'` 时输出只打在终端上，**模型看不到** —— 它执行完 `ls` 拿不到任何文件名，
-执行完 `git status` 不知道仓库脏不脏，只能靠编。
-这里改成 pipe 捕获，把 stdout / stderr / 退出码一起返回，并设了输出上限防止一次撑爆上下文。
-
-### 3. 沙箱只管路径，不管进程
-
-`resolveInWorkspace` 拦得住 `../` 逃逸和越界的绝对路径，但拦不住命令本身 ——
-`exec_command` 走的是 shell，可以在系统任意位置读写。真正的进程级隔离需要容器
-（Docker / Firejail / Windows Sandbox）。
-所以这一层的作用是**拦住模型走错路，而不是拦住恶意代码**。
-
-## 运行
+需要 Node.js 20+ 和 pnpm。仓库没有可运行的 Agent 入口。
 
 ```bash
 pnpm install
-pnpm test          # node --test
-pnpm test:watch
+pnpm test
 ```
 
-## 目录
+Windows PowerShell 若阻止 `pnpm.ps1`，可以运行 `pnpm.cmd test`。Windows 上的真实进程终止测试需要 `taskkill` 权限；受限环境拒绝终止进程时，该用例会失败，工具会报告终止失败。
 
-```
-src/
-├── config.js              # 集中配置（工作区根、shell、超时、输出上限）
-├── safety/
-│   ├── sandbox.js         # 路径边界
-│   └── timeout.js         # 通用超时
-└── tools/
-    ├── registry.js        # 工具注册 + 结果处理器路由
-    ├── execCommand.js     # 命令执行（沙箱 + 超时 + 捕获输出）
-    ├── filePaths.js       # 文件工具真实路径边界
-    ├── readFile.js        # 读取文本文件
-    ├── listDirectory.js   # 列出目录
-    ├── writeFile.js       # 创建或覆盖文本文件
-    └── index.js           # 内置工具组装
-test/
-├── sandbox.test.js
-├── timeout.test.js
-├── execCommand.test.js
-└── fileTools.test.js
-```
+## 下一阶段
+
+先实现**结构化工具调用的单 Agent 循环**：模型适配层、工具调用与结果回传、轮数和耗时上限、停止条件、可检查的执行记录，以及用假模型运行的离线测试。经典 ReAct 的 `Thought/Action/Observation` 文本格式不是接口要求。当前设计与待解决问题见 [技术文档](docs/TECHNICAL.md)。
+
+## 文档导航
+
+- [目标与验收](docs/GOALS.md)：项目目的、当前进度、下一阶段的完成标准。
+- [架构与运行](docs/TECHNICAL.md)：实际代码结构、数据流、配置、测试及已知缺口。
+- [设计决策](docs/DESIGN.md)：为什么采用当前工具与 Agent 结构，哪些决定仍待验证。
+- [约束与边界](docs/CONSTRAINTS.md)：安全边界、资源上限、开发规则。
