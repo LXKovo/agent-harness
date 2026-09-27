@@ -26,6 +26,27 @@ function createPassingFakeModel() {
       const task = messages.find((message) => message.role === 'user').content;
       const toolMessages = messages.filter((message) => message.role === 'tool');
 
+      if (task.includes('featureEnabled: false')) {
+        if (toolMessages.length === 0) {
+          return response([call('search-setting', 'search_files', { query: 'featureEnabled: false' })]);
+        }
+        if (toolMessages.length === 1) {
+          assert.match(toolMessages[0].content, /src\/settings\.js/);
+          return response([call('read-setting', 'read_file', { filePath: 'src/settings.js' })]);
+        }
+        if (toolMessages.length === 2) {
+          return response([call('patch-setting', 'apply_patch', {
+            filePath: 'src/settings.js',
+            edits: [{ oldText: 'featureEnabled: false', newText: 'featureEnabled: true' }],
+          })]);
+        }
+        if (toolMessages.length === 3) {
+          return response([call('verify-setting', 'read_file', { filePath: 'src/settings.js' })]);
+        }
+        assert.match(toolMessages.at(-1).content, /featureEnabled: true/);
+        return response([], '配置已完成局部修改并复查');
+      }
+
       if (task.includes('node --test')) {
         if (toolMessages.length === 0) {
           return response([
@@ -74,8 +95,8 @@ function createPassingFakeModel() {
 test('固定测评在独立临时工作区运行并自动检查结果', async () => {
   const suite = await runEvalSuite({ cases: evalCases, model: createPassingFakeModel() });
   assert.equal(suite.passed, true);
-  assert.equal(suite.passedCount, 3);
-  assert.equal(suite.totalCount, 3);
+  assert.equal(suite.passedCount, 4);
+  assert.equal(suite.totalCount, 4);
   assert.ok(suite.results.every((result) => result.workspaceRoot === null));
   assert.ok(suite.results.every((result) => result.checks.every((check) => check.passed)));
 });

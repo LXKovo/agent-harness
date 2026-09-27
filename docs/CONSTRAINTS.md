@@ -43,6 +43,8 @@ Windows 超时使用 `taskkill /t /f`，可能因系统权限失败。POSIX 当�
 | 单条命令超时上限 | 10 分钟 | `MAX_COMMAND_TIMEOUT` | 模型参数不得突破 |
 | 输出流或文件内容上限 | 8000 字符 | `MAX_OUTPUT_CHARS` | 不是完整返回字符串的上限 |
 | 单次写入文本上限 | 100000 字符 | `MAX_WRITE_CHARS` | 以 JS 字符串长度计算 |
+| 单次搜索文件数上限 | 2000 个 | `MAX_SEARCH_FILES` | `.git`、`node_modules` 和链接不进入扫描 |
+| 单个搜索文件上限 | 1000000 字节 | `MAX_SEARCH_FILE_BYTES` | 超大文件跳过，单次读取不会超过上限加一个字节 |
 | Agent 模型轮数 | 12 | `AGENT_MAX_TURNS` | 每次模型请求算一轮 |
 | Agent 总耗时 | 120 秒 | `AGENT_MAX_DURATION_MS` | 模型请求可取消；工具中途取消能力因工具而异 |
 | Agent 上下文字符预算 | 120000 字符 | `AGENT_MAX_CONTEXT_CHARS` | 序列化长度，不是 token 硬上限 |

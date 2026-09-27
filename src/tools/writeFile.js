@@ -1,7 +1,6 @@
-import { lstat, open, rename, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { lstat, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
+import { replaceFileAtomically } from './atomicWrite.js';
 import { resolveWritePath } from './filePaths.js';
 
 export function createWriteFileTool({ workspaceRoot, maxWriteChars }) {
@@ -42,21 +41,7 @@ export function createWriteFileTool({ workspaceRoot, maxWriteChars }) {
           return `写入文件失败: ${filePath} — 目标不是普通文件`;
         }
 
-        // 在同一目录写临时文件，再替换目标，避免覆盖中途留下半份内容。
-        const temp = join(dirname(target), `.agent-harness-${randomUUID()}.tmp`);
-        let created = false;
-        try {
-          const file = await open(temp, 'wx', existing?.mode ?? 0o666);
-          created = true;
-          try {
-            await file.writeFile(content, { encoding: 'utf8' });
-          } finally {
-            await file.close();
-          }
-          await rename(temp, target);
-        } finally {
-          if (created) await rm(temp, { force: true });
-        }
+        await replaceFileAtomically(target, content, existing?.mode);
 
         return `已${existing ? '覆盖' : '创建'}文件: ${filePath} (${Buffer.byteLength(content)} 字节)`;
       } catch (err) {

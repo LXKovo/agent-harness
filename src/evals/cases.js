@@ -30,6 +30,16 @@ async function exactRootEntries(workspaceRoot, expected) {
   };
 }
 
+async function exactDirectoryEntries(workspaceRoot, directory, expected) {
+  const actual = (await readdir(join(workspaceRoot, directory))).sort();
+  const wanted = [...expected].sort();
+  return {
+    name: `${directory} 目录没有多余文件`,
+    passed: JSON.stringify(actual) === JSON.stringify(wanted),
+    detail: `期望 ${wanted.join(', ')}；实际 ${actual.join(', ')}`,
+  };
+}
+
 async function nodeTestsPass(workspaceRoot) {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, ['--test'], {
@@ -68,6 +78,21 @@ const SHELL_FIXTURE_TEST = [
   '',
 ].join('\n');
 
+const SEARCH_PATCH_SETTINGS_BEFORE = [
+  'export const settings = {',
+  '  featureEnabled: false,',
+  '  retryCount: 2,',
+  '};',
+  '',
+].join('\n');
+
+const SEARCH_PATCH_SETTINGS_AFTER = SEARCH_PATCH_SETTINGS_BEFORE.replace(
+  'featureEnabled: false',
+  'featureEnabled: true',
+);
+
+const SEARCH_PATCH_NOTES = 'featureEnabled 由 src/settings.js 管理，请勿修改本文档。\n';
+
 export const evalCases = [
   {
     id: 'create-exact-file',
@@ -101,6 +126,43 @@ export const evalCases = [
         await exactFile(workspaceRoot, 'input.txt', 'red\nblue'),
         await exactFile(workspaceRoot, 'result.txt', 'RED\nBLUE'),
         await exactRootEntries(workspaceRoot, ['input.txt', 'result.txt']),
+      ];
+    },
+  },
+  {
+    id: 'search-and-patch',
+    title: '搜索并局部修改已有文件',
+    task: [
+      '在工作区中搜索包含 `featureEnabled: false` 的文件，读取并确认上下文，',
+      '然后必须使用 apply_patch 将该处精确修改为 `featureEnabled: true`。',
+      '不要使用 write_file，不要修改其他内容或新增文件。修改后读取文件确认结果。',
+    ].join(''),
+    async setup({ workspaceRoot }) {
+      await mkdir(join(workspaceRoot, 'src'));
+      await mkdir(join(workspaceRoot, 'docs'));
+      await writeFile(join(workspaceRoot, 'src', 'settings.js'), SEARCH_PATCH_SETTINGS_BEFORE, 'utf8');
+      await writeFile(join(workspaceRoot, 'docs', 'notes.txt'), SEARCH_PATCH_NOTES, 'utf8');
+    },
+    async check({ workspaceRoot, agentResult }) {
+      const toolNames = agentResult?.events
+        .filter((event) => event.type === 'tool')
+        .map((event) => event.name) ?? [];
+      return [
+        await exactFile(workspaceRoot, 'src/settings.js', SEARCH_PATCH_SETTINGS_AFTER),
+        await exactFile(workspaceRoot, 'docs/notes.txt', SEARCH_PATCH_NOTES),
+        {
+          name: 'Agent 使用了搜索和局部修改工具',
+          passed: toolNames.includes('search_files') && toolNames.includes('apply_patch'),
+          detail: `工具调用: ${toolNames.join(', ') || '(无)'}`,
+        },
+        {
+          name: 'Agent 没有使用整文件写入',
+          passed: !toolNames.includes('write_file'),
+          detail: toolNames.includes('write_file') ? '检测到 write_file 调用' : '未调用 write_file',
+        },
+        await exactRootEntries(workspaceRoot, ['docs', 'src']),
+        await exactDirectoryEntries(workspaceRoot, 'src', ['settings.js']),
+        await exactDirectoryEntries(workspaceRoot, 'docs', ['notes.txt']),
       ];
     },
   },

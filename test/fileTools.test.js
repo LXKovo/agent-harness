@@ -30,10 +30,19 @@ const registry = (overrides = {}) => createToolRegistry({
 });
 
 describe('文件工具', () => {
-  test('注册三个文件工具，参数错误返回文本', async () => {
+  test('注册内置工具，参数错误返回文本', async () => {
     const tools = registry();
-    assert.deepEqual(tools.names(), ['exec_command', 'read_file', 'list_directory', 'write_file']);
+    assert.deepEqual(tools.names(), [
+      'exec_command',
+      'read_file',
+      'list_directory',
+      'search_files',
+      'apply_patch',
+      'write_file',
+    ]);
     assert.match(await tools.invoke('read_file', {}), /参数不合法/);
+    assert.match(await tools.invoke('search_files', {}), /参数不合法/);
+    assert.match(await tools.invoke('apply_patch', { filePath: 'x' }), /参数不合法/);
     assert.match(await tools.invoke('write_file', { filePath: 'x' }), /参数不合法/);
   });
 
@@ -88,6 +97,102 @@ describe('文件工具', () => {
     assert.match(await tools.invoke('write_file', { filePath: 'nul.txt', content: 'a\0b' }), /NUL/);
   });
 
+  test('search_files 递归返回路径和位置，并支持大小写选项', async () => {
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'alpha.js'), 'const value = "Needle";\n// Needle again\n', 'utf8');
+    await writeFile(join(root, 'src', 'beta.js'), 'const value = "needle";\n', 'utf8');
+    const tools = registry({ maxOutputChars: 1_000 });
+
+    const exact = await tools.invoke('search_files', { query: 'Needle', path: 'src' });
+    assert.match(exact, /src\/alpha\.js:1:16/);
+    assert.match(exact, /src\/alpha\.js:2:4/);
+    assert.doesNotMatch(exact, /beta\.js:/);
+
+    const insensitive = await tools.invoke('search_files', {
+      query: 'needle', path: 'src', caseSensitive: false,
+    });
+    assert.match(insensitive, /alpha\.js/);
+    assert.match(insensitive, /beta\.js/);
+    assert.match(insensitive, /找到 3 处匹配/);
+  });
+
+  test('search_files 跳过依赖、二进制和超大文件，并限制结果与越界路径', async () => {
+    await mkdir(join(root, 'node_modules'));
+    await mkdir(join(root, '.git'));
+    await writeFile(join(root, 'visible.txt'), 'hit hit hit', 'utf8');
+    await writeFile(join(root, 'node_modules', 'hidden.txt'), 'hit', 'utf8');
+    await writeFile(join(root, '.git', 'config'), 'hit', 'utf8');
+    await writeFile(join(root, 'binary.bin'), Buffer.from([104, 105, 116, 0]));
+    await writeFile(join(root, 'large.txt'), 'hit'.repeat(20), 'utf8');
+    const tools = registry({ maxOutputChars: 1_000, maxSearchFileBytes: 20 });
+
+    const out = await tools.invoke('search_files', { query: 'hit', maxResults: 2 });
+    assert.match(out, /visible\.txt/);
+    assert.doesNotMatch(out, /hidden\.txt/);
+    assert.doesNotMatch(out, /binary\.bin:/);
+    assert.match(out, /找到 2 处匹配/);
+    assert.match(out, /结果已达到/);
+    assert.match(await tools.invoke('search_files', { query: 'hit', path: '../outside' }), /越出工作区/);
+    assert.match(await tools.invoke('search_files', { query: 'a\nb' }), /参数不合法/);
+  });
+
+  test('apply_patch 原子执行多项精确替换', async () => {
+    await writeFile(join(root, 'code.js'), 'const left = 1;\nconst right = 2;\n', 'utf8');
+    const tools = registry();
+    const out = await tools.invoke('apply_patch', {
+      filePath: 'code.js',
+      edits: [
+        { oldText: 'left = 1', newText: 'left = 10' },
+        { oldText: 'right = 2', newText: 'right = 20' },
+      ],
+    });
+    assert.match(out, /已修改文件/);
+    assert.match(out, /2 处替换/);
+    assert.equal(await readFile(join(root, 'code.js'), 'utf8'), 'const left = 10;\nconst right = 20;\n');
+  });
+
+  test('apply_patch 拒绝歧义和失败项，不留下部分修改', async () => {
+    await writeFile(join(root, 'repeat.txt'), 'same\nsame\n', 'utf8');
+    const tools = registry();
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: 'repeat.txt', edits: [{ oldText: 'same', newText: 'changed' }],
+    }), /出现 2 次/);
+    assert.equal(await readFile(join(root, 'repeat.txt'), 'utf8'), 'same\nsame\n');
+
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: 'repeat.txt',
+      edits: [
+        { oldText: 'same', newText: 'changed', replaceAll: true },
+        { oldText: 'missing', newText: 'value' },
+      ],
+    }), /旧文本未找到/);
+    assert.equal(await readFile(join(root, 'repeat.txt'), 'utf8'), 'same\nsame\n');
+
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: 'repeat.txt', edits: [{ oldText: 'same', newText: 'changed', replaceAll: true }],
+    }), /2 处替换/);
+    assert.equal(await readFile(join(root, 'repeat.txt'), 'utf8'), 'changed\nchanged\n');
+  });
+
+  test('apply_patch 拒绝不存在、二进制、越界和过大的结果', async () => {
+    await writeFile(join(root, 'binary.bin'), Buffer.from([1, 0, 2]));
+    await writeFile(join(root, 'large.txt'), `${'a'.repeat(99)}z`, 'utf8');
+    const tools = registry();
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: 'missing.txt', edits: [{ oldText: 'a', newText: 'b' }],
+    }), /修改文件失败/);
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: 'binary.bin', edits: [{ oldText: 'a', newText: 'b' }],
+    }), /二进制/);
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: '../outside/secret.txt', edits: [{ oldText: 'a', newText: 'b' }],
+    }), /越出工作区/);
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: 'large.txt', edits: [{ oldText: 'z', newText: 'abcdefghij' }],
+    }), /修改后内容超过/);
+    assert.equal(await readFile(join(root, 'large.txt'), 'utf8'), `${'a'.repeat(99)}z`);
+  });
+
   test('文件工具拒绝通过目录链接访问工作区外', async (t) => {
     await writeFile(join(outside, 'secret.txt'), 'secret');
     try {
@@ -103,6 +208,10 @@ describe('文件工具', () => {
     const tools = registry();
     assert.match(await tools.invoke('read_file', { filePath: 'escape/secret.txt' }), /符号链接越出工作区/);
     assert.match(await tools.invoke('list_directory', { path: 'escape' }), /符号链接越出工作区/);
+    assert.match(await tools.invoke('search_files', { path: 'escape', query: 'secret' }), /符号链接越出工作区/);
+    assert.match(await tools.invoke('apply_patch', {
+      filePath: 'escape/secret.txt', edits: [{ oldText: 'secret', newText: 'bad' }],
+    }), /符号链接越出工作区/);
     assert.match(await tools.invoke('write_file', { filePath: 'escape/new.txt', content: 'bad' }), /符号链接越出工作区/);
     assert.equal(await readFile(join(outside, 'secret.txt'), 'utf8'), 'secret');
   });

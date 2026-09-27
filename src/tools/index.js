@@ -2,6 +2,8 @@ import { ToolRegistry } from './registry.js';
 import { createExecCommandTool } from './execCommand.js';
 import { createReadFileTool } from './readFile.js';
 import { createListDirectoryTool } from './listDirectory.js';
+import { createSearchFilesTool } from './searchFiles.js';
+import { createApplyPatchTool } from './applyPatch.js';
 import { createWriteFileTool } from './writeFile.js';
 import { config } from '../config.js';
 
@@ -37,6 +39,8 @@ export function createToolRegistry(overrides = {}, { includeExecCommand = true }
   };
   registry.register(createReadFileTool(settings), fileProcessors);
   registry.register(createListDirectoryTool(settings), fileProcessors);
+  registry.register(createSearchFilesTool(settings), fileProcessors);
+  registry.register(createApplyPatchTool(settings), fileProcessors);
   registry.register(createWriteFileTool(settings), fileProcessors);
 
   return registry;

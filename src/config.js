@@ -60,4 +60,8 @@ export const config = {
 
   /** write_file 单次可写入的最大字符数 */
   maxWriteChars: parseInt(process.env.MAX_WRITE_CHARS) || 100_000,
+
+  /** search_files 单次最多检查的文件数和单文件字节数 */
+  maxSearchFiles: parseInt(process.env.MAX_SEARCH_FILES) || 2_000,
+  maxSearchFileBytes: parseInt(process.env.MAX_SEARCH_FILE_BYTES) || 1_000_000,
 };

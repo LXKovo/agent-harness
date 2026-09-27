@@ -15,7 +15,7 @@ src/
   model/openaiCompatible.js OpenAI 兼容 Chat Completions 客户端
   config.js                 工具配置
   safety/                   路径检查与通用等待超时
-  tools/                    注册表、命令及三个文件工具
+  tools/                    注册表、命令及五个文件工具
 test/
   agent.test.js             假模型多轮任务、错误和停止条件
   cli.test.js               本地 HTTP 兼容接口的端到端测试
@@ -49,6 +49,8 @@ CLI → runAgent(task, model, registry, budgets)
 | `exec_command` | 捕获 stdout、stderr、退出码；超时或取消时尝试终止进程 | `cwd` 检查不限制命令本身；Windows 依赖 `taskkill /t /f`，POSIX 只杀直接子进程 |
 | `read_file` | 读取 UTF-8 文本，拒绝无效编码及 NUL | 长内容截断，不适于解析完整大文件 |
 | `list_directory` | 列出直接子项 | 不递归，列表长度有限 |
+| `search_files` | 递归进行单行字面量搜索，返回文件与行列位置 | 跳过链接、二进制、大文件、`.git` 和 `node_modules`；限制扫描文件数、匹配数和输出长度 |
+| `apply_patch` | 按顺序执行一个或多个精确文本替换 | 默认要求唯一匹配，只修改已有 UTF-8 文件；全部校验完成后原子替换 |
 | `write_file` | 默认只新建；覆盖时先写同目录临时文件再替换 | 不建父目录，不提供并发冲突检测 |
 
 命令子进程会过滤名称符合常见 `API_KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`CREDENTIAL` 模式的环境变量。这**不是凭据隔离**：命令仍能读工作区外文件，也可能读 `.env` 等磁盘凭据。CLI 要求显式指定任务目录并拒绝其根目录中的 `.env`，但不能证明整个目录树没有秘密文件；只在可信的一次性目录开启 shell。文件工具的真实路径检查也存在检查与使用之间的竞态。详见 [CONSTRAINTS.md](./CONSTRAINTS.md)。
@@ -65,16 +67,16 @@ pnpm test
 pnpm run eval
 ```
 
-`AGENT_MAX_TURNS`、`AGENT_MAX_DURATION_MS`、`AGENT_MAX_CONTEXT_CHARS` 为 CLI 的严格正整数配置。工具层仍使用 `WORKSPACE_ROOT`、`SHELL_PATH`、`COMMAND_TIMEOUT`、`MAX_COMMAND_TIMEOUT`、`MAX_OUTPUT_CHARS`、`MAX_WRITE_CHARS`；其中工具配置的环境变量解析仍采用 `parseInt(value) || default`，尚未统一验证。命令输出上限分别作用于 stdout 和 stderr，不是完整工具结果的硬上限。
+`AGENT_MAX_TURNS`、`AGENT_MAX_DURATION_MS`、`AGENT_MAX_CONTEXT_CHARS` 为 CLI 的严格正整数配置。工具层仍使用 `WORKSPACE_ROOT`、`SHELL_PATH`、`COMMAND_TIMEOUT`、`MAX_COMMAND_TIMEOUT`、`MAX_OUTPUT_CHARS`、`MAX_WRITE_CHARS`、`MAX_SEARCH_FILES`、`MAX_SEARCH_FILE_BYTES`；其中工具配置的环境变量解析仍采用 `parseInt(value) || default`，尚未统一验证。命令输出上限分别作用于 stdout 和 stderr，不是完整工具结果的硬上限。
 
 离线测试包含假模型任务与本地 HTTP 服务端到端流程，不需外网和真实密钥。Windows 真正的进程终止测试依赖系统允许 `taskkill`；拒绝时会报告终止失败。`withTimeout()` 仍只停止等待 Promise，不会取消底层操作；模型请求采用 SDK 的 `AbortSignal`。
 
-`pnpm run eval` 使用真实模型，当前顺序运行两个文件任务和一个代码修复任务。每项测评用 `mkdtemp` 创建独立工作区；文件任务只注册文件工具，代码任务显式注册 `exec_command`。检查器验证精确文件内容、根目录集合、受保护夹具未修改、Agent 实际调用过命令，并独立执行 `node --test`。模型返回 `completed` 只是必要条件，检查失败仍判为失败。
+`pnpm run eval` 使用真实模型，当前顺序运行三个文件任务和一个代码修复任务。每项测评用 `mkdtemp` 创建独立工作区；文件任务只注册文件工具，代码任务显式注册 `exec_command`。检查器验证精确文件内容、目录集合、受保护夹具未修改、搜索和补丁工具调用、命令调用，并独立执行 `node --test`。模型返回 `completed` 只是必要条件，检查失败仍判为失败。
 
 `--repeat` 最多允许 20 轮。每次命令把汇总、逐项检查和不含工具参数的事件写入 `eval-results/<timestamp>.json`；该目录不入库。默认清理工作区，`--keep-workspaces` 会保留并打印路径。首个真实基线和异常记录见 [EVALUATION.md](./EVALUATION.md)。
 
 ## 5. 尚未完成的 M1 验收
 
-- 扩充不同难度的代码夹具，并通过重复运行判断当前 3/3 小样本是否能在更长时间窗口保持稳定。
+- 扩充不同难度的代码夹具，并通过重复运行判断当前小样本是否能在更长时间窗口保持稳定。
 - 为工具 I/O 结果增加机器可读状态，区分成功、拒绝、错误和截断；避免从中文结果文本推断。
 - 根据真实任务的轨迹决定是否需要更精确的 token 预算、压缩、流式进度及厂商差异处理。

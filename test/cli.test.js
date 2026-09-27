@@ -60,6 +60,8 @@ test('CLI 通过本地 OpenAI 兼容接口完成文件任务', { timeout: 15_000
     assert.equal(await readFile(join(workspace, 'result.txt'), 'utf8'), 'hello');
     assert.equal(requests.length, 2);
     assert.equal(requests[0].tools.some((tool) => tool.function.name === 'exec_command'), false);
+    assert.equal(requests[0].tools.some((tool) => tool.function.name === 'search_files'), true);
+    assert.equal(requests[0].tools.some((tool) => tool.function.name === 'apply_patch'), true);
     assert.equal(requests[1].messages.at(-1).tool_call_id, 'write-1');
     assert.match(requests[1].messages.at(-1).content, /已创建文件/);
   } finally {

@@ -54,7 +54,7 @@
 
 **决定**：当前单元与工具测试使用 `node:test` 和 `node:assert`，不引入测试框架。M1 首版用假模型测试工具调用协议，并用独立临时工作区运行固定真实任务，由确定性文件检查器判定结果。
 
-**进展与代价**：假模型和本地 HTTP 测试验证协议、循环及 CLI；两个文件任务和一个 shell 代码任务会调用真实模型、检查最终工作区并保存 JSON 报告。首个 3 轮基线为 9/9 通过，但样本很小，不能说明长期稳定性。评测方案应先小后大。参见 [OpenAI 的 Agent 指南](https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/)和 [Anthropic 的评测讨论](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)。
+**进展与代价**：假模型和本地 HTTP 测试验证协议、循环及 CLI；三个文件任务和一个 shell 代码任务会调用真实模型、检查最终工作区并保存 JSON 报告。当前四个任务的 3 轮基线为 12/12 通过，但样本仍很小，不能说明长期稳定性。评测方案应先小后大。参见 [OpenAI 的 Agent 指南](https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/)和 [Anthropic 的评测讨论](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)。
 
 ## D8 · 自研运行逻辑，以 Chat Completions 兼容接口起步（已实施，待实测）
 
