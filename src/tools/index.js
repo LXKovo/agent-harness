@@ -12,21 +12,24 @@ import { config } from '../config.js';
  * 新增工具 = 加一个文件 + 在这里多一行，不需要动任何路由代码。
  *
  * @param {object} [overrides] - 覆盖 config 中的字段（测试用）
+ * @param {{includeExecCommand?: boolean}} [options] - CLI 默认关闭命令工具
  * @returns {ToolRegistry}
  */
-export function createToolRegistry(overrides = {}) {
+export function createToolRegistry(overrides = {}, { includeExecCommand = true } = {}) {
   const settings = { ...config, ...overrides };
   const registry = new ToolRegistry();
 
-  registry.register(createExecCommandTool({
-    ...settings,
-    defaultTimeoutMs: settings.commandTimeoutMs,
-    maxTimeoutMs: settings.maxCommandTimeoutMs,
-  }), {
-    // 终端只显示首行（成功/失败/超时那行），完整输出留给模型
-    summarize: (result) => result.split('\n')[0],
-    compact: (result) => result,
-  });
+  if (includeExecCommand) {
+    registry.register(createExecCommandTool({
+      ...settings,
+      defaultTimeoutMs: settings.commandTimeoutMs,
+      maxTimeoutMs: settings.maxCommandTimeoutMs,
+    }), {
+      // 终端只显示首行（成功/失败/超时那行），完整输出留给模型
+      summarize: (result) => result.split('\n')[0],
+      compact: (result) => result,
+    });
+  }
 
   const fileProcessors = {
     summarize: (result) => result.split('\n')[0],

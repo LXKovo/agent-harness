@@ -1,108 +1,79 @@
 # 架构与运行
 
-> 本文记录**仓库已经实现的行为**，并单独标注 M1 设计草案。目标和验收见 [GOALS.md](./GOALS.md)，取舍见 [DESIGN.md](./DESIGN.md)，不可忽略的边界见 [CONSTRAINTS.md](./CONSTRAINTS.md)。
+> 本文记录仓库**已经实现的行为**。项目目标和未完成的 M1 验收见 [GOALS.md](./GOALS.md)，取舍见 [DESIGN.md](./DESIGN.md)，安全边界见 [CONSTRAINTS.md](./CONSTRAINTS.md)。
 
-## 1. 当前状态
+## 1. 当前结构
 
-运行时为 Node.js ESM；参数校验依赖 Zod，测试使用 `node:test`。`src/` 目前只有配置、安全辅助函数和四个工具，**没有模型客户端、Agent 循环、CLI 或可运行的 `src/index.js`**。`package.json` 的 `main` 指向该不存在的文件；在入口实现前，不应把本仓库当作可执行 Agent 或可导入包。
+运行时为 Node.js ESM。`openai` SDK 只承担 Chat Completions 网络请求，`dotenv` 为 CLI 加载本地配置，Zod 校验工具参数并转换 JSON Schema；Agent 循环由本仓库实现，测试使用 `node:test`。
 
 ```text
 src/
-  config.js
-  safety/
-    sandbox.js          词法路径边界
-    timeout.js          Promise 等待超时，不取消底层操作
-  tools/
-    registry.js         注册、Zod 校验、调用和错误文本化
-    index.js            内置工具组装
-    execCommand.js      shell 命令执行
-    filePaths.js        文件工具的真实路径检查
-    readFile.js
-    listDirectory.js
-    writeFile.js
+  index.js                  CLI：配置、权限选择、进度与最终状态
+  eval.js                   真实模型固定测评入口
+  agent/runAgent.js         单 Agent 工具调用循环及运行事件
+  evals/                    固定任务、工作区准备、检查器与测评运行器
+  model/openaiCompatible.js OpenAI 兼容 Chat Completions 客户端
+  config.js                 工具配置
+  safety/                   路径检查与通用等待超时
+  tools/                    注册表、命令及三个文件工具
 test/
-  sandbox.test.js
-  timeout.test.js
-  execCommand.test.js
-  fileTools.test.js
+  agent.test.js             假模型多轮任务、错误和停止条件
+  cli.test.js               本地 HTTP 兼容接口的端到端测试
+  eval.test.js              测评隔离、文件检查和失败判定
+  其余测试                   工具、路径与超时
 ```
 
-## 2. 当前调用链
+## 2. 调用链
 
 ```text
-测试或未来的运行时
-  → createToolRegistry(config 覆盖项)
-  → registry.invoke(name, rawArgs)
-      → 查找工具 → Zod safeParse → tool.invoke(parsedArgs)
-      → 返回可读字符串；未知工具、参数错误和异常也返回字符串
+CLI → runAgent(task, model, registry, budgets)
+  → 将注册工具的 Zod schema 转为 JSON Schema
+  → model.complete(messages, tools, AbortSignal)
+  → 最终文本：返回 completed
+  → 结构化工具调用：验证 call ID/参数 → registry.invoke(name, args)
+  → 以相同 call ID 追加 tool 消息 → 下一轮模型请求
 ```
 
-`registry.list()` 返回工具定义。`registry.getProcessor(name)` 提供 `compact` / `summarize`，**当前没有 Agent 或终端层调用它们**；注册处理器不等于已实现终端呈现。`registry.invoke()` 只返回字符串，没有结构化成功标志、错误类别或调用轨迹。M1 需要在不丢失模型可读内容的前提下，建立运行时可判断的状态。
+模型层使用 `openai` SDK 的 `chat.completions.create`。配置项为 `MODEL_NAME`、`MODEL_API_KEY`、可选 `MODEL_BASE_URL`；CLI 也接受 `OPENAI_MODEL`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`。未设置 URL 时使用 SDK 默认的 OpenAI 服务。当前没有流式输出、Responses API 或厂商专属协议。兼容服务仍需实测工具调用、参数格式和工具结果回传；仅能聊天不等于能运行本 Agent。
 
-| 工具 | 当前行为 | 需要知道的边界 |
+`runAgent()` 每次模型请求算一轮，默认最多 12 轮、总耗时 120 秒，按消息和工具定义序列化后的字符数检查 120000 字符预算。这是粗略上限，**不是 token 计数**。总耗时到达时中止模型网络请求，并将取消信号传给工具注册表；命令工具尝试终止其进程。文件工具的底层 I/O 尚未实现中途取消。模型错误、协议错误、上下文上限、轮数上限、取消和超时分别有终止状态。
+
+运行事件记录模型轮次、耗时、工具调用数量、用量以及工具名、调用 ID、耗时与部分错误类别；不复制完整参数和文件内容到事件中。CLI 输出进度摘要，`runAgent()` 返回事件数组。**工具返回的字符串并无统一的成功标志**：运行事件中的 `returned` 只表示工具返回了内容，不表示副作用成功。未知工具与参数错误可单独标记；工具内部捕获的 I/O 错误目前仍需阅读文本。
+
+## 3. 工具与权限
+
+`createToolRegistry(overrides, { includeExecCommand })` 组装内置工具。CLI 默认 `includeExecCommand: false`，只有传 `--allow-shell` 才提供 `exec_command`。直接调用注册表的代码可以自行选择是否包含命令工具。`registry.invoke()` 继续返回模型可读字符串；可选的第三个参数把 `AbortSignal` 传给工具。`getProcessor()` 仍提供 `compact` / `summarize`，目前 Agent 没有消费它们。
+
+| 工具 | 当前行为 | 关键边界 |
 |---|---|---|
-| `exec_command` | shell 执行；捕获 stdout、stderr、退出码；超时尝试终止进程 | `cwd` 检查不约束命令本身；Windows 用 `taskkill /t /f`，POSIX 只向直接子进程发 `SIGKILL`；终止失败会返回错误 |
-| `read_file` | 读取 UTF-8 文本前缀，拒绝无效编码与 NUL | 内容过长截断，不能用于完整解析大文件或二进制文件 |
-| `list_directory` | 列出一个目录的直接子项 | 不递归；达到长度上限后停止 |
-| `write_file` | 默认仅新建，`overwrite: true` 时在同目录写临时文件再替换 | 不自动建父目录；文本长度有上限；不提供并发冲突检测 |
+| `exec_command` | 捕获 stdout、stderr、退出码；超时或取消时尝试终止进程 | `cwd` 检查不限制命令本身；Windows 依赖 `taskkill /t /f`，POSIX 只杀直接子进程 |
+| `read_file` | 读取 UTF-8 文本，拒绝无效编码及 NUL | 长内容截断，不适于解析完整大文件 |
+| `list_directory` | 列出直接子项 | 不递归，列表长度有限 |
+| `write_file` | 默认只新建；覆盖时先写同目录临时文件再替换 | 不建父目录，不提供并发冲突检测 |
 
-文件工具先用 `resolveInWorkspace` 检查词法路径，再用 `realpath` 检查已有目标或待写入文件的父目录。它们拒绝经目录链接访问工作区外，但检查与操作之间仍可能发生并发路径替换。`exec_command` 不经过文件工具的真实路径检查。完整说明见 [CONSTRAINTS.md](./CONSTRAINTS.md)。
+命令子进程会过滤名称符合常见 `API_KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`CREDENTIAL` 模式的环境变量。这**不是凭据隔离**：命令仍能读工作区外文件，也可能读 `.env` 等磁盘凭据。CLI 要求显式指定任务目录并拒绝其根目录中的 `.env`，但不能证明整个目录树没有秘密文件；只在可信的一次性目录开启 shell。文件工具的真实路径检查也存在检查与使用之间的竞态。详见 [CONSTRAINTS.md](./CONSTRAINTS.md)。
 
-`MAX_OUTPUT_CHARS` 目前限制 `exec_command` 的 **stdout 与 stderr 各自**的累计内容，并限制读文件或列目录的主体内容；状态行、路径和截断提示会使最终字符串更长。它不是整个工具结果的统一硬上限。
+## 4. 配置与运行
 
-## 3. 配置与依赖
-
-| 环境变量 | 当前默认值 | 用途 |
-|---|---:|---|
-| `WORKSPACE_ROOT` | 仓库根目录 | 文件路径检查的根；命令的默认工作目录 |
-| `SHELL_PATH` | 自动探测；否则系统默认 shell | Windows 优先常见 Git Bash 路径，找不到时回退；不能保证一定使用 Bash |
-| `COMMAND_TIMEOUT` | 30000 ms | 单条命令默认超时 |
-| `MAX_COMMAND_TIMEOUT` | 600000 ms | 工具参数 `timeoutMs` 的上限 |
-| `MAX_OUTPUT_CHARS` | 8000 | 命令每个输出流、读文件或列目录的主体长度 |
-| `MAX_WRITE_CHARS` | 100000 | 单次写入的文本长度 |
-
-配置当前使用 `parseInt(value) || default`，尚未统一验证正整数及配置项之间的关系。`package.json` 同时写有 pnpm `devEngines: ^11.10.0` 和 `engines: >=8.0.0`，支持范围互相矛盾；统一版本要求属于后续代码修复，不应只改文档数字。
-
-## 4. 测试与运行
+需要 Node.js 22+、pnpm 11.10+。CLI 从当前目录加载 `.env`，也可直接使用进程环境变量。
 
 ```bash
 pnpm install
-pnpm test                 # node --test
-node --test test/fileTools.test.js
+node src/index.js --workspace ./scratch "在 result.txt 写入 hello"
+node src/index.js --workspace ./scratch --allow-shell "运行该目录里的测试"
+pnpm test
+pnpm run eval
 ```
 
-目前有 35 个离线测试：路径检查 10、通用超时 5、命令工具 13、文件工具 7。Windows 的真实进程终止测试依赖系统允许 `taskkill`；在限制进程终止的沙箱中会失败。这类失败应看作环境边界的信号，不应把测试改成“只要返回超时文本就通过”。
+`AGENT_MAX_TURNS`、`AGENT_MAX_DURATION_MS`、`AGENT_MAX_CONTEXT_CHARS` 为 CLI 的严格正整数配置。工具层仍使用 `WORKSPACE_ROOT`、`SHELL_PATH`、`COMMAND_TIMEOUT`、`MAX_COMMAND_TIMEOUT`、`MAX_OUTPUT_CHARS`、`MAX_WRITE_CHARS`；其中工具配置的环境变量解析仍采用 `parseInt(value) || default`，尚未统一验证。命令输出上限分别作用于 stdout 和 stderr，不是完整工具结果的硬上限。
 
-`withTimeout()` 通过 `Promise.race` 限制等待时间，**不会取消底层 Promise**。未来的模型网络请求需要由适配层使用可取消的请求机制。
+离线测试包含假模型任务与本地 HTTP 服务端到端流程，不需外网和真实密钥。Windows 真正的进程终止测试依赖系统允许 `taskkill`；拒绝时会报告终止失败。`withTimeout()` 仍只停止等待 Promise，不会取消底层操作；模型请求采用 SDK 的 `AbortSignal`。
 
-## 5. M1 设计草案：有界工具调用循环
+`pnpm run eval` 使用真实模型，当前顺序运行 `create-exact-file` 和 `transform-existing-file`。每项测评用 `mkdtemp` 创建独立工作区，只注册文件工具，并检查精确文件内容及根目录文件集合。模型返回 `completed` 只是必要条件，文件检查失败仍判为失败。默认清理工作区；`--keep-workspaces` 会保留并打印路径。测评目前输出单次结果，不保存历史统计。
 
-M1 从单 Agent 开始。模型接口先适配一个 provider，向运行时返回统一形状的“最终答复或结构化工具调用”。工具仍经注册表校验和调用；运行时保留工具调用 ID，并把对应结果反馈给模型。不要用自由文本 `Thought:` / `Action:` 作为机器协议。
+## 5. 尚未完成的 M1 验收
 
-```text
-messages = [system, user(task)]
-在轮数、总耗时和上下文预算内循环：
-  model.generate(messages, toolSchemas, abortSignal)
-  若模型给出最终答复 → 结束
-  若模型给出工具调用 → 对每个 call 记录 ID、名称和参数
-    → 校验与执行 → 记录结果、耗时和错误类别
-    → 以相同 call ID 回传工具结果，进入下一轮
-  若模型或工具协议无效 → 返回明确的失败状态
-到达上限 → 停止并报告未完成原因
-```
-
-首批测试用假模型验证多步工具调用、参数错误后的恢复、停止条件和取消；再在一次性测试工作区用真实模型跑一个小任务。评测与轨迹记录从 M1 开始，后续是否加入规划、记忆或子 Agent 由失败样本决定。
-
-## 6. 已知设计债与决定时机
-
-| 问题 | 当前影响 | 建议时机 |
-|---|---|---|
-| shell 不受工作区路径检查约束，没有工具权限策略或进程隔离 | 不宜对不可信任务无人值守运行 | M1 自主执行前明确运行环境和权限边界 |
-| 工具结果只有字符串；处理器尚无消费者 | 运行时难以区分失败、截断和正常结果 | M1 设计内部结果结构与轨迹 |
-| 没有真实入口；`package.json.main` 指向不存在的文件 | 无法作为 CLI 或包启动 | M1 增加入口时一起修正 |
-| POSIX 超时只杀直接子进程；Windows `taskkill` 可能被拒绝 | 后代进程可能残留 | 需要跨平台长跑前做进程树验证与修复 |
-| 输出上限按流而非整体；配置值未严格校验 | 上下文和资源预算不精确 | M1 上下文预算接线前修复 |
-| pnpm 版本声明冲突 | 安装要求不清晰 | 下一次维护 `package.json` 时统一 |
-| 无终端实时输出或运行轨迹 | 人无法观察长命令进度 | M1 加入呈现与追踪时实现 |
-
-模型 SDK、网络请求协议、记忆存储和多 Agent 结构均未选定。先做一个可替换的模型适配边界，再依据真实调用和评测选具体依赖；不要为尚未出现的多 provider 需求写通用框架。
+- 重复运行两个固定任务，记录目标模型的成功率、轮数、耗时和失败样本；单次人工真实任务已成功。
+- 增加一个在受控夹具中修改代码并运行测试的 shell 测评；在此之前保持现有固定测评不开放命令工具。
+- 为工具 I/O 结果增加机器可读状态，区分成功、拒绝、错误和截断；避免从中文结果文本推断。
+- 根据真实任务的轨迹决定是否需要更精确的 token 预算、压缩、流式进度及厂商差异处理。

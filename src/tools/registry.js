@@ -78,7 +78,7 @@ export class ToolRegistry {
    *
    * @returns {Promise<string>} 工具结果或错误说明
    */
-  async invoke(name, rawArgs) {
+  async invoke(name, rawArgs, context = {}) {
     const tool = this.#tools.get(name);
 
     if (!tool) {
@@ -95,7 +95,7 @@ export class ToolRegistry {
     }
 
     try {
-      const result = await tool.invoke(parsed.data);
+      const result = await tool.invoke(parsed.data, context);
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
       return `工具 "${name}" 执行出错: ${err?.message || err}`;

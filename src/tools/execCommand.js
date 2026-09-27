@@ -87,12 +87,19 @@ export function resolveTimeoutMs(requested, { defaultTimeoutMs, maxTimeoutMs }) 
  * 于是模型执行 `ls` 后拿不到任何文件列表，只能靠猜。
  * Agent 要能干活，就必须让它看见命令的输出。
  */
-function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, terminateProcessTree }) {
+function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, terminateProcessTree, signal }) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
+    const childEnv = { ...process.env };
+    for (const name of Object.keys(childEnv)) {
+      if (/(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)(?:$|_)/i.test(name)) {
+        delete childEnv[name];
+      }
+    }
     const child = spawn(command, {
       cwd,
       shell,
+      env: childEnv,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -101,6 +108,7 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, termina
     let stderr = '';
     let truncated = false;
     let timedOut = false;
+    let aborted = false;
     let settled = false;
     let terminationPending = false;
     let closeResult;
@@ -134,11 +142,13 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, termina
       settled = true;
       clearTimeout(timer);
       clearTimeout(closeTimer);
+      signal?.removeEventListener('abort', onAbort);
       resolve({
         stdout,
         stderr,
         truncated,
         timedOut,
+        aborted,
         durationMs: Date.now() - startedAt,
         ...extra,
       });
@@ -150,8 +160,10 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, termina
       child.unref();
     };
 
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const requestStop = (reason) => {
+      if (settled || terminationPending || closeResult) return;
+      if (reason === 'timeout') timedOut = true;
+      else aborted = true;
       terminationPending = true;
       Promise.resolve().then(() => terminateProcessTree(child)).then((status) => {
         terminationPending = false;
@@ -172,11 +184,15 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, termina
         releaseChild();
         finish({ ok: false, code: null, signal: null, terminationError: err.message });
       });
-    }, timeoutMs);
+    };
+    const onAbort = () => requestStop('abort');
+    const timer = setTimeout(() => requestStop('timeout'), timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
 
     child.on('error', (err) => finish({ ok: false, code: null, signal: null, error: err.message }));
     child.on('close', (code, signal) => {
-      closeResult = { ok: !timedOut && code === 0, code, signal, error: null };
+      closeResult = { ok: !timedOut && !aborted && code === 0, code, signal, error: null };
       if (!terminationPending) finish(closeResult);
     });
   });
@@ -192,6 +208,10 @@ function formatResult({ command, cwd, result, effectiveTimeoutMs, maxOutputChars
     lines.push(result.terminationError
       ? `命令超时（${effectiveTimeoutMs}ms），终止进程失败: ${command} — ${result.terminationError}`
       : `命令超时（${effectiveTimeoutMs}ms），已终止进程树: ${command}`);
+  } else if (result.aborted) {
+    lines.push(result.terminationError
+      ? `命令已取消，终止进程失败: ${command} — ${result.terminationError}`
+      : `命令已取消: ${command}`);
   } else if (result.error) {
     lines.push(`命令无法启动: ${command} — ${result.error}`);
   } else if (result.ok) {
@@ -255,7 +275,7 @@ export function createExecCommandTool({
       reason: z.string().optional().describe('执行这条命令的原因，便于事后审计'),
     }),
 
-    async invoke({ command, cwd, timeoutMs }) {
+    async invoke({ command, cwd, timeoutMs }, { signal } = {}) {
       // 1. 沙箱：解析工作目录
       let resolvedCwd;
       try {
@@ -277,6 +297,7 @@ export function createExecCommandTool({
         timeoutMs: effectiveTimeoutMs,
         maxOutputChars,
         terminateProcessTree,
+        signal,
       });
 
       return formatResult({ command, cwd: resolvedCwd, result, effectiveTimeoutMs, maxOutputChars });

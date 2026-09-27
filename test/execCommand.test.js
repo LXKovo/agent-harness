@@ -106,4 +106,33 @@ describe('exec_command', () => {
     });
     assert.match(out, /已截断/);
   });
+
+  test('命令子进程不继承常见凭据环境变量', async () => {
+    const previous = process.env.HARNESS_TEST_TOKEN;
+    process.env.HARNESS_TEST_TOKEN = 'should-not-leak';
+    try {
+      const out = await tool.invoke({
+        command: 'node -e "process.stdout.write(process.env.HARNESS_TEST_TOKEN || \'clean\')"',
+      });
+      assert.match(out, /clean/);
+      assert.doesNotMatch(out, /should-not-leak/);
+    } finally {
+      if (previous === undefined) delete process.env.HARNESS_TEST_TOKEN;
+      else process.env.HARNESS_TEST_TOKEN = previous;
+    }
+  });
+
+  test('外部取消会停止等待并报告进程终止失败', async () => {
+    const controller = new AbortController();
+    const cancellingTool = createExecCommandTool({
+      ...config,
+      defaultTimeoutMs: 3000,
+      maxTimeoutMs: 3000,
+      maxOutputChars: 100,
+      terminateProcessTree: async () => ({ ok: false, error: 'Access denied' }),
+    });
+    const pending = cancellingTool.invoke({ command: 'sleep 1' }, { signal: controller.signal });
+    setTimeout(() => controller.abort(), 30);
+    assert.match(await pending, /命令已取消，终止进程失败.*Access denied/);
+  });
 });
