@@ -135,25 +135,24 @@ export async function runAgent({
         }
         const toolStartedAt = Date.now();
         const name = call.function.name;
-        let content;
-        let outcome = 'returned';
+        let result;
+        let args;
         try {
-          const args = parseArguments(call.function.arguments);
-          const tool = registry.get(name);
-          if (!tool) {
-            outcome = 'unknown_tool';
-            content = `工具 "${name}" 不存在。可用工具: ${registry.names().join(', ')}`;
-          } else {
-            const parsed = tool.schema.safeParse(args);
-            if (!parsed.success) outcome = 'invalid_arguments';
-            content = await registry.invoke(name, args, { signal: controller.signal });
-          }
+          args = parseArguments(call.function.arguments);
         } catch (err) {
-          outcome = 'invalid_arguments';
-          content = `工具 "${name}" 参数不合法: ${err?.message ?? err}`;
+          result = { status: 'rejected', code: 'invalid_arguments', truncated: false,
+            content: `工具 "${name}" 参数不合法: ${err?.message ?? err}` };
         }
-        messages.push({ role: 'tool', tool_call_id: call.id, content });
-        emit({ type: 'tool', turn, callId: call.id, name, outcome, durationMs: Date.now() - toolStartedAt });
+        if (!result) {
+          result = typeof registry.invokeResult === 'function'
+            ? await registry.invokeResult(name, args, { signal: controller.signal })
+            : { status: 'success', truncated: false,
+              content: await registry.invoke(name, args, { signal: controller.signal }) };
+        }
+        messages.push({ role: 'tool', tool_call_id: call.id, content: result.content });
+        emit({ type: 'tool', turn, callId: call.id, name,
+          status: result.status, truncated: result.truncated,
+          outcome: result.code ?? result.status, durationMs: Date.now() - toolStartedAt });
       }
     }
     return stop('max_turns', `达到 ${maxTurns} 轮上限`);

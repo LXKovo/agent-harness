@@ -2,6 +2,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { replaceFileAtomically } from './atomicWrite.js';
 import { resolveWritePath } from './filePaths.js';
+import { toolError, toolResult, withToolResult } from './result.js';
 
 function countOccurrences(content, search) {
   let count = 0;
@@ -30,7 +31,7 @@ export function createApplyPatchTool({ workspaceRoot, maxWriteChars }) {
     replaceAll: z.boolean().optional().describe('设为 true 时替换该旧文本的全部匹配'),
   });
 
-  return {
+  return withToolResult({
     name: 'apply_patch',
     description: '局部修改工作区内一个现有 UTF-8 文本文件。按顺序执行精确文本替换；默认要求每段旧文本只出现一次，全部校验成功后才原子写入。',
     schema: z.object({
@@ -46,46 +47,46 @@ export function createApplyPatchTool({ workspaceRoot, maxWriteChars }) {
         const target = await resolveWritePath(filePath, workspaceRoot);
         const existing = await lstat(target);
         if (existing.isSymbolicLink()) {
-          return `修改文件失败: ${filePath} — 不允许修改符号链接`;
+          return toolResult('rejected', `修改文件失败: ${filePath} — 不允许修改符号链接`);
         }
         if (!existing.isFile()) {
-          return `修改文件失败: ${filePath} — 目标不是普通文件`;
+          return toolResult('rejected', `修改文件失败: ${filePath} — 目标不是普通文件`);
         }
         if (existing.size > maxWriteChars * 4) {
-          return `修改文件失败: ${filePath} — 现有文件超过可修改大小上限`;
+          return toolResult('rejected', `修改文件失败: ${filePath} — 现有文件超过可修改大小上限`);
         }
 
         let content = decodeText(await readFile(target), filePath);
         if (content.length > maxWriteChars) {
-          return `修改文件失败: ${filePath} — 现有文件超过 ${maxWriteChars} 字符上限`;
+          return toolResult('rejected', `修改文件失败: ${filePath} — 现有文件超过 ${maxWriteChars} 字符上限`);
         }
         let replacementCount = 0;
         for (let index = 0; index < edits.length; index += 1) {
           const { oldText, newText, replaceAll = false } = edits[index];
           if (oldText.includes('\0') || newText.includes('\0')) {
-            return `修改文件失败: ${filePath} — 第 ${index + 1} 项包含 NUL 字符`;
+            return toolResult('rejected', `修改文件失败: ${filePath} — 第 ${index + 1} 项包含 NUL 字符`);
           }
           const occurrences = countOccurrences(content, oldText);
           if (occurrences === 0) {
-            return `修改文件失败: ${filePath} — 第 ${index + 1} 项旧文本未找到`;
+            return toolResult('rejected', `修改文件失败: ${filePath} — 第 ${index + 1} 项旧文本未找到`);
           }
           if (!replaceAll && occurrences !== 1) {
-            return `修改文件失败: ${filePath} — 第 ${index + 1} 项旧文本出现 ${occurrences} 次，请提供更多上下文或设置 replaceAll=true`;
+            return toolResult('rejected', `修改文件失败: ${filePath} — 第 ${index + 1} 项旧文本出现 ${occurrences} 次，请提供更多上下文或设置 replaceAll=true`);
           }
           content = replaceAll
             ? content.split(oldText).join(newText)
             : content.replace(oldText, newText);
           replacementCount += replaceAll ? occurrences : 1;
           if (content.length > maxWriteChars) {
-            return `修改文件失败: ${filePath} — 修改后内容超过 ${maxWriteChars} 字符上限`;
+            return toolResult('rejected', `修改文件失败: ${filePath} — 修改后内容超过 ${maxWriteChars} 字符上限`);
           }
         }
 
         await replaceFileAtomically(target, content, existing.mode);
-        return `已修改文件: ${filePath} (${replacementCount} 处替换，${Buffer.byteLength(content)} 字节)`;
+        return toolResult('success', `已修改文件: ${filePath} (${replacementCount} 处替换，${Buffer.byteLength(content)} 字节)`);
       } catch (err) {
-        return `修改文件失败: ${filePath} — ${err.message}`;
+        return toolError(`修改文件失败: ${filePath} — ${err.message}`, err);
       }
     },
-  };
+  });
 }

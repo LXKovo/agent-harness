@@ -46,6 +46,7 @@ describe('exec_command', () => {
     const out = await tool.invoke({ command: 'exit 3' });
     assert.match(out, /命令执行失败/);
     assert.match(out, /3/);
+    assert.equal((await tool.invokeResult({ command: 'exit 3' })).status, 'error');
   });
 
   test('stderr 同样被捕获', async () => {
@@ -105,6 +106,11 @@ describe('exec_command', () => {
       timeoutMs: 5000,
     });
     assert.match(out, /已截断/);
+    const partial = await tool.invokeResult({
+      command: 'node -e "process.stdout.write(\'x\'.repeat(5000))"', timeoutMs: 5000,
+    });
+    assert.equal(partial.status, 'truncated');
+    assert.equal(partial.truncated, true);
   });
 
   test('命令子进程不继承常见凭据环境变量', async () => {

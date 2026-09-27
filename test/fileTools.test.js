@@ -30,6 +30,35 @@ const registry = (overrides = {}) => createToolRegistry({
 });
 
 describe('文件工具', () => {
+  test('结构化结果区分成功、拒绝、I/O 错误和截断，同时保留文本接口', async () => {
+    const tools = registry({ maxOutputChars: 5 });
+    await writeFile(join(root, 'long.txt'), 'abcdefghijk', 'utf8');
+
+    const success = await tools.invokeResult('write_file', { filePath: 'new.txt', content: 'ok' });
+    assert.equal(success.status, 'success');
+    assert.equal(success.truncated, false);
+    assert.match(success.content, /已创建文件/);
+
+    const rejected = await tools.invokeResult('write_file', { filePath: 'nul.txt', content: 'a\0b' });
+    assert.equal(rejected.status, 'rejected');
+    assert.match(rejected.content, /NUL/);
+    assert.equal((await tools.invokeResult('write_file', { filePath: 'new.txt', content: 'again' })).status,
+      'rejected');
+
+    const invalid = await tools.invokeResult('read_file', {});
+    assert.equal(invalid.status, 'rejected');
+    assert.equal(invalid.code, 'invalid_arguments');
+
+    const missing = await tools.invokeResult('read_file', { filePath: 'missing.txt' });
+    assert.equal(missing.status, 'error');
+    assert.match(missing.content, /读取文件失败/);
+
+    const partial = await tools.invokeResult('read_file', { filePath: 'long.txt' });
+    assert.equal(partial.status, 'truncated');
+    assert.equal(partial.truncated, true);
+    assert.equal(await tools.invoke('read_file', { filePath: 'long.txt' }), partial.content);
+  });
+
   test('注册内置工具，参数错误返回文本', async () => {
     const tools = registry();
     assert.deepEqual(tools.names(), [

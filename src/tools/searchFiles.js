@@ -2,6 +2,7 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { z } from 'zod';
 import { resolveExistingPath } from './filePaths.js';
+import { toolError, toolResult, withToolResult } from './result.js';
 
 const SKIPPED_NAMES = new Set(['.git', 'node_modules']);
 
@@ -38,7 +39,7 @@ export function createSearchFilesTool({
   maxSearchFiles = 2_000,
   maxSearchFileBytes = 1_000_000,
 }) {
-  return {
+  return withToolResult({
     name: 'search_files',
     description: '在工作区文件中递归搜索单行字面量文本，返回路径、行号、列号和匹配行。跳过符号链接、二进制文件、超大文件、.git 和 node_modules。',
     schema: z.object({
@@ -129,17 +130,18 @@ export function createSearchFilesTool({
           if (truncated) break;
         }
 
-        return [
+        const incomplete = truncated || hitFileLimit || skippedLargeFiles > 0;
+        return toolResult(incomplete ? 'truncated' : 'success', [
           `搜索: ${JSON.stringify(query)}，起点: ${path}`,
           ...(matches.length ? matches : ['(没有匹配)']),
           `已扫描 ${scannedFiles} 个文本候选文件，找到 ${matches.length} 处匹配`,
           ...(skippedLargeFiles ? [`跳过 ${skippedLargeFiles} 个超过 ${maxSearchFileBytes} 字节的文件`] : []),
           ...(hitFileLimit ? [`达到 ${maxSearchFiles} 个文件的扫描上限`] : []),
           ...(truncated ? ['(结果已达到数量或输出长度上限)'] : []),
-        ].join('\n');
+        ].join('\n'), { truncated: incomplete });
       } catch (err) {
-        return `搜索文件失败: ${path} — ${err.message}`;
+        return toolError(`搜索文件失败: ${path} — ${err.message}`, err);
       }
     },
-  };
+  });
 }

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { resolveInWorkspace, SandboxError } from '../safety/sandbox.js';
+import { toolResult, withToolResult } from './result.js';
 
 /**
  * 杀掉子进程及其整棵进程树
@@ -258,7 +259,7 @@ export function createExecCommandTool({
   maxOutputChars,
   terminateProcessTree = killTree,
 }) {
-  return {
+  return withToolResult({
     name: 'exec_command',
 
     description: [
@@ -282,7 +283,7 @@ export function createExecCommandTool({
         resolvedCwd = cwd ? resolveInWorkspace(cwd, { root: workspaceRoot }) : workspaceRoot;
       } catch (err) {
         if (err instanceof SandboxError) {
-          return `命令未执行 —— ${err.message}`;
+          return toolResult('rejected', `命令未执行 —— ${err.message}`);
         }
         throw err;
       }
@@ -300,7 +301,10 @@ export function createExecCommandTool({
         signal,
       });
 
-      return formatResult({ command, cwd: resolvedCwd, result, effectiveTimeoutMs, maxOutputChars });
+      const status = result.ok ? (result.truncated ? 'truncated' : 'success') : 'error';
+      return toolResult(status,
+        formatResult({ command, cwd: resolvedCwd, result, effectiveTimeoutMs, maxOutputChars }),
+        { truncated: result.truncated });
     },
-  };
+  });
 }

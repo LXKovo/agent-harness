@@ -1,9 +1,10 @@
 import { open } from 'node:fs/promises';
 import { z } from 'zod';
 import { resolveExistingPath } from './filePaths.js';
+import { toolError, toolResult, withToolResult } from './result.js';
 
 export function createReadFileTool({ workspaceRoot, maxOutputChars }) {
-  return {
+  return withToolResult({
     name: 'read_file',
     description: '读取工作区内一个 UTF-8 文本文件。返回文件内容；过长时只返回开头并标明截断。',
     schema: z.object({
@@ -16,7 +17,7 @@ export function createReadFileTool({ workspaceRoot, maxOutputChars }) {
         const file = await open(path, 'r');
         try {
           if (!(await file.stat()).isFile()) {
-            return `读取文件失败: ${filePath} — 不是普通文件`;
+            return toolResult('rejected', `读取文件失败: ${filePath} — 不是普通文件`);
           }
 
           const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -30,17 +31,17 @@ export function createReadFileTool({ workspaceRoot, maxOutputChars }) {
               try {
                 content += decoder.decode();
               } catch {
-                return `读取文件失败: ${filePath} — 文件不是有效的 UTF-8 文本`;
+                return toolResult('rejected', `读取文件失败: ${filePath} — 文件不是有效的 UTF-8 文本`);
               }
               break;
             }
             if (buffer.subarray(0, bytesRead).includes(0)) {
-              return `读取文件失败: ${filePath} — 不支持二进制文件`;
+              return toolResult('rejected', `读取文件失败: ${filePath} — 不支持二进制文件`);
             }
             try {
               content += decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
             } catch {
-              return `读取文件失败: ${filePath} — 文件不是有效的 UTF-8 文本`;
+              return toolResult('rejected', `读取文件失败: ${filePath} — 文件不是有效的 UTF-8 文本`);
             }
             if (content.length > maxOutputChars) {
               truncated = true;
@@ -51,18 +52,18 @@ export function createReadFileTool({ workspaceRoot, maxOutputChars }) {
             }
           }
 
-          return [
+          return toolResult(truncated ? 'truncated' : 'success', [
             `文件: ${filePath}`,
             '--- content ---',
             content || '(空文件)',
             ...(truncated ? [`(内容超过 ${maxOutputChars} 字符，已截断)`] : []),
-          ].join('\n');
+          ].join('\n'), { truncated });
         } finally {
           await file.close();
         }
       } catch (err) {
-        return `读取文件失败: ${filePath} — ${err.message}`;
+        return toolError(`读取文件失败: ${filePath} — ${err.message}`, err);
       }
     },
-  };
+  });
 }

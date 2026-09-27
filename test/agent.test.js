@@ -58,6 +58,8 @@ test('假模型完成读文件、写文件、验证结果的多轮任务', async
   assert.equal(await readFile(join(workspace, 'output.txt'), 'utf8'), 'HELLO');
   assert.deepEqual(result.events.filter((event) => event.type === 'tool').map((event) => event.callId),
     ['read-1', 'write-1', 'check-1']);
+  assert.deepEqual(result.events.filter((event) => event.type === 'tool').map((event) => event.status),
+    ['success', 'success', 'success']);
 });
 
 test('无效工具名、参数和 JSON 作为工具结果回传给模型', async () => {
@@ -84,6 +86,41 @@ test('无效工具名、参数和 JSON 作为工具结果回传给模型', async
   assert.equal(result.status, 'completed');
   assert.deepEqual(result.events.filter((event) => event.type === 'tool').map((event) => event.outcome),
     ['unknown_tool', 'invalid_arguments', 'invalid_arguments']);
+  assert.deepEqual(result.events.filter((event) => event.type === 'tool').map((event) => event.status),
+    ['rejected', 'rejected', 'rejected']);
+});
+
+test('Agent 事件记录工具内部错误与截断，模型仍收到文本', async () => {
+  await writeFile(join(workspace, 'long.txt'), 'abcdef', 'utf8');
+  const registry = createToolRegistry({ workspaceRoot: workspace, maxOutputChars: 3 }, { includeExecCommand: false });
+  let calls = 0;
+  const model = {
+    async complete({ messages }) {
+      if (calls++ === 0) return response([
+        call('missing', 'read_file', { filePath: 'missing.txt' }),
+        call('partial', 'read_file', { filePath: 'long.txt' }),
+      ]);
+      assert.match(messages.at(-2).content, /读取文件失败/);
+      assert.match(messages.at(-1).content, /已截断/);
+      return response([], '完成');
+    },
+  };
+  const result = await runAgent({ task: '读取文件', model, registry });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.events.filter((event) => event.type === 'tool')
+    .map(({ status, truncated }) => [status, truncated]), [['error', false], ['truncated', true]]);
+});
+
+test('注册表将工具异常标为错误，同时保留可读错误', async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: 'broken', description: '失败工具', schema: z.object({}),
+    async invoke() { throw new Error('磁盘不可用'); },
+  });
+  const result = await registry.invokeResult('broken', {});
+  assert.equal(result.status, 'error');
+  assert.equal(result.code, 'tool_exception');
+  assert.match(result.content, /磁盘不可用/);
 });
 
 test('轮数、上下文、协议错误与模型错误有明确终止状态', async () => {

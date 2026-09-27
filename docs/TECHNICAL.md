@@ -38,11 +38,11 @@ CLI → runAgent(task, model, registry, budgets)
 
 `runAgent()` 每次模型请求算一轮，默认最多 12 轮、总耗时 120 秒，按消息和工具定义序列化后的字符数检查 120000 字符预算。这是粗略上限，**不是 token 计数**。总耗时到达时中止模型网络请求，并将取消信号传给工具注册表；命令工具尝试终止其进程。文件工具的底层 I/O 尚未实现中途取消。模型错误、协议错误、上下文上限、轮数上限、取消和超时分别有终止状态。
 
-运行事件记录模型轮次、耗时、工具调用数量、用量以及工具名、调用 ID、耗时与部分错误类别；不复制完整参数和文件内容到事件中。CLI 输出进度摘要，`runAgent()` 返回事件数组。**工具返回的字符串并无统一的成功标志**：运行事件中的 `returned` 只表示工具返回了内容，不表示副作用成功。未知工具与参数错误可单独标记；工具内部捕获的 I/O 错误目前仍需阅读文本。
+运行事件记录模型轮次、耗时、工具调用数量、用量以及工具名、调用 ID、耗时与结果状态；不复制完整参数和文件内容到事件中。CLI 输出进度摘要，`runAgent()` 返回事件数组。工具事件的 `status` 为 `success`、`rejected`、`error` 或 `truncated`，另有 `truncated` 布尔值。`outcome` 保留更具体的 `unknown_tool`、`invalid_arguments`、`tool_exception`，其余情况与 `status` 相同。状态由工具产生，不解析返回文案。
 
 ## 3. 工具与权限
 
-`createToolRegistry(overrides, { includeExecCommand })` 组装内置工具。CLI 默认 `includeExecCommand: false`，只有传 `--allow-shell` 才提供 `exec_command`。直接调用注册表的代码可以自行选择是否包含命令工具。`registry.invoke()` 继续返回模型可读字符串；可选的第三个参数把 `AbortSignal` 传给工具。`getProcessor()` 仍提供 `compact` / `summarize`，目前 Agent 没有消费它们。
+`createToolRegistry(overrides, { includeExecCommand })` 组装内置工具。CLI 默认 `includeExecCommand: false`，只有传 `--allow-shell` 才提供 `exec_command`。直接调用注册表的代码可以自行选择是否包含命令工具。`registry.invoke()` 继续返回模型可读字符串；`registry.invokeResult()` 返回 `{ status, content, truncated }`，可选 `code` 表示注册表层的具体错误。两者的可选第三个参数都可把 `AbortSignal` 传给工具。内置工具在输入不合要求或触及工作区边界时返回 `rejected`，I/O 与命令执行失败返回 `error`，结果不完整时返回 `truncated`；若命令同时失败和截断，`status` 为 `error`、`truncated` 为 `true`。自定义的纯文本工具仍受支持，但无法提供准确的失败状态，注册表将其视为 `success`。`getProcessor()` 仍提供 `compact` / `summarize`，目前 Agent 没有消费它们。
 
 | 工具 | 当前行为 | 关键边界 |
 |---|---|---|
@@ -78,5 +78,4 @@ pnpm run eval
 ## 5. 尚未完成的 M1 验收
 
 - 扩充不同难度的代码夹具，并通过重复运行判断当前小样本是否能在更长时间窗口保持稳定。
-- 为工具 I/O 结果增加机器可读状态，区分成功、拒绝、错误和截断；避免从中文结果文本推断。
 - 根据真实任务的轨迹决定是否需要更精确的 token 预算、压缩、流式进度及厂商差异处理。

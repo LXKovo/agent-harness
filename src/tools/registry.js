@@ -76,13 +76,19 @@ export class ToolRegistry {
    * Agent 的核心约定：工具失败必须以文本形式回到模型手里，
    * 模型才能看到原因并换一条路。任何 throw 都会打断 ReAct 循环。
    *
-   * @returns {Promise<string>} 工具结果或错误说明
+   * @returns {Promise<string>} 模型可读的工具结果或错误说明
    */
   async invoke(name, rawArgs, context = {}) {
+    return (await this.invokeResult(name, rawArgs, context)).content;
+  }
+
+  /** 程序使用的结果；content 与 invoke() 返回的文本完全相同。 */
+  async invokeResult(name, rawArgs, context = {}) {
     const tool = this.#tools.get(name);
 
     if (!tool) {
-      return `工具 "${name}" 不存在。可用工具: ${this.names().join(', ')}`;
+      return { status: 'rejected', code: 'unknown_tool', truncated: false,
+        content: `工具 "${name}" 不存在。可用工具: ${this.names().join(', ')}` };
     }
 
     const parsed = tool.schema.safeParse(rawArgs ?? {});
@@ -91,14 +97,24 @@ export class ToolRegistry {
       const issues = parsed.error.issues
         .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
         .join('; ');
-      return `工具 "${name}" 参数不合法: ${issues}`;
+      return { status: 'rejected', code: 'invalid_arguments', truncated: false,
+        content: `工具 "${name}" 参数不合法: ${issues}` };
     }
 
     try {
-      const result = await tool.invoke(parsed.data, context);
-      return typeof result === 'string' ? result : JSON.stringify(result);
+      const result = tool.invokeResult
+        ? await tool.invokeResult(parsed.data, context)
+        : await tool.invoke(parsed.data, context);
+      if (typeof result === 'object' && result !== null
+        && typeof result.status === 'string' && typeof result.content === 'string') {
+        return result;
+      }
+      // Custom text-only tools remain supported. They cannot report failure metadata.
+      return { status: 'success', truncated: false,
+        content: typeof result === 'string' ? result : JSON.stringify(result) };
     } catch (err) {
-      return `工具 "${name}" 执行出错: ${err?.message || err}`;
+      return { status: 'error', code: 'tool_exception', truncated: false,
+        content: `工具 "${name}" 执行出错: ${err?.message || err}` };
     }
   }
 }

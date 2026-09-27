@@ -1,9 +1,10 @@
 import { opendir } from 'node:fs/promises';
 import { z } from 'zod';
 import { resolveExistingPath } from './filePaths.js';
+import { toolError, toolResult, withToolResult } from './result.js';
 
 export function createListDirectoryTool({ workspaceRoot, maxOutputChars }) {
-  return {
+  return withToolResult({
     name: 'list_directory',
     description: '列出工作区内一个目录的直接子项，不递归。标明文件、目录和符号链接；结果过长时截断。',
     schema: z.object({
@@ -30,15 +31,15 @@ export function createListDirectoryTool({ workspaceRoot, maxOutputChars }) {
           usedChars += line.length + 1;
         }
 
-        return [
+        return toolResult(truncated ? 'truncated' : 'success', [
           `目录: ${path}`,
           ...entries,
           ...(!entries.length && !truncated ? ['(空目录)'] : []),
           ...(truncated ? [`(列表超过 ${maxOutputChars} 字符，已截断)`] : []),
-        ].join('\n');
+        ].join('\n'), { truncated });
       } catch (err) {
-        return `列出目录失败: ${path} — ${err.message}`;
+        return toolError(`列出目录失败: ${path} — ${err.message}`, err);
       }
     },
-  };
+  });
 }
