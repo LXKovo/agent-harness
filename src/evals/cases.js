@@ -1,5 +1,9 @@
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 async function exactFile(workspaceRoot, filePath, expected) {
   try {
@@ -25,6 +29,44 @@ async function exactRootEntries(workspaceRoot, expected) {
     detail: `期望 ${wanted.join(', ')}；实际 ${actual.join(', ')}`,
   };
 }
+
+async function nodeTestsPass(workspaceRoot) {
+  try {
+    const { stdout, stderr } = await execFileAsync(process.execPath, ['--test'], {
+      cwd: workspaceRoot,
+      timeout: 10_000,
+      windowsHide: true,
+    });
+    const summary = `${stdout}\n${stderr}`.split('\n').find((line) => /tests?\s+\d+/i.test(line));
+    return { name: 'node --test 通过', passed: true, detail: summary?.trim() || '退出码为 0' };
+  } catch (err) {
+    const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`.trim();
+    return {
+      name: 'node --test 通过',
+      passed: false,
+      detail: output ? output.slice(-500) : err.message,
+    };
+  }
+}
+
+const SHELL_FIXTURE_PACKAGE = `${JSON.stringify({
+  name: 'agent-harness-eval-fixture',
+  private: true,
+  type: 'module',
+  scripts: { test: 'node --test' },
+}, null, 2)}\n`;
+
+const SHELL_FIXTURE_TEST = [
+  "import { test } from 'node:test';",
+  "import assert from 'node:assert/strict';",
+  "import { add } from '../src/add.js';",
+  '',
+  "test('add returns the sum', () => {",
+  '  assert.equal(add(2, 3), 5);',
+  '  assert.equal(add(-1, 1), 0);',
+  '});',
+  '',
+].join('\n');
 
 export const evalCases = [
   {
@@ -59,6 +101,44 @@ export const evalCases = [
         await exactFile(workspaceRoot, 'input.txt', 'red\nblue'),
         await exactFile(workspaceRoot, 'result.txt', 'RED\nBLUE'),
         await exactRootEntries(workspaceRoot, ['input.txt', 'result.txt']),
+      ];
+    },
+  },
+  {
+    id: 'repair-code-and-test',
+    title: '修复代码并运行测试',
+    allowShell: true,
+    task: [
+      '这是一个小型 Node.js 项目。读取现有源码和测试，修复 src/add.js 中的错误，',
+      '使 node --test 通过。不要修改 package.json 或 test/add.test.js，也不要新增文件。',
+      '修改后必须使用 exec_command 运行 node --test，并根据输出确认结果。',
+    ].join(''),
+    async setup({ workspaceRoot }) {
+      await mkdir(join(workspaceRoot, 'src'));
+      await mkdir(join(workspaceRoot, 'test'));
+      await writeFile(join(workspaceRoot, 'package.json'), SHELL_FIXTURE_PACKAGE, 'utf8');
+      await writeFile(join(workspaceRoot, 'src', 'add.js'), [
+        'export function add(left, right) {',
+        '  return left - right;',
+        '}',
+        '',
+      ].join('\n'), 'utf8');
+      await writeFile(join(workspaceRoot, 'test', 'add.test.js'), SHELL_FIXTURE_TEST, 'utf8');
+    },
+    async check({ workspaceRoot, agentResult }) {
+      const usedExecCommand = agentResult?.events.some(
+        (event) => event.type === 'tool' && event.name === 'exec_command',
+      );
+      return [
+        await exactFile(workspaceRoot, 'package.json', SHELL_FIXTURE_PACKAGE),
+        await exactFile(workspaceRoot, 'test/add.test.js', SHELL_FIXTURE_TEST),
+        await nodeTestsPass(workspaceRoot),
+        {
+          name: 'Agent 实际运行了测试',
+          passed: Boolean(usedExecCommand),
+          detail: usedExecCommand ? '检测到 exec_command 调用' : '没有检测到 exec_command 调用',
+        },
+        await exactRootEntries(workspaceRoot, ['package.json', 'src', 'test']),
       ];
     },
   },

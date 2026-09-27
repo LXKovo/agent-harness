@@ -28,7 +28,10 @@ export async function runEvalCase({
 
   try {
     await testCase.setup({ workspaceRoot });
-    const registry = createToolRegistry({ workspaceRoot }, { includeExecCommand: false });
+    const registry = createToolRegistry(
+      { workspaceRoot },
+      { includeExecCommand: testCase.allowShell === true },
+    );
     agentResult = await runAgent({
       task: testCase.task,
       model,
@@ -61,6 +64,7 @@ export async function runEvalCase({
     turns: agentResult?.turns ?? 0,
     durationMs: Date.now() - startedAt,
     checks,
+    events: agentResult?.events ?? [],
     workspaceRoot: keepWorkspace ? workspaceRoot : null,
   };
 }

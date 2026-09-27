@@ -34,13 +34,14 @@ Windows PowerShell 若阻止 `pnpm.ps1`，可使用 `pnpm.cmd`。测试不使用
 固定测评会调用 `.env` 中配置的真实模型，因此会产生对应服务的请求和费用。每个任务使用独立的系统临时目录，只开放三个文件工具；程序根据最终文件判定结果，不采信模型的“已完成”声明。
 
 ```bash
-pnpm run eval                              # 运行全部测评
+pnpm run eval                              # 运行全部测评并保存 JSON 报告
+pnpm run eval --repeat 3                   # 连续运行三轮
 pnpm run eval --list                       # 查看测评名称
 pnpm run eval --case create-exact-file
 pnpm run eval --keep-workspaces            # 保留临时目录供人工检查
 ```
 
-当前有两个基线：精确创建文件，以及读取并转换已有文件。输出会显示每项检查、模型轮数、耗时和总通过率。默认在测评结束后清理临时目录。
+当前有三个基线：精确创建文件、读取并转换已有文件，以及修复代码并运行测试。前两个只开放文件工具；代码任务在一次性夹具中开放 shell，并由测评程序独立复跑测试。输出会显示每项检查、模型轮数、耗时和总通过率，JSON 报告写入被 Git 忽略的 `eval-results/`。默认在测评结束后清理临时目录。首轮真实基线见 [固定测评文档](docs/EVALUATION.md)。
 
 ## 当前工具与限制
 
@@ -51,4 +52,4 @@ pnpm run eval --keep-workspaces            # 保留临时目录供人工检查
 | `list_directory` | 列出目录的直接子项 | 检查真实路径，限制列表长度 |
 | `write_file` | 写入 UTF-8 文本 | 默认拒绝覆盖，覆盖须显式指定；限制写入大小 |
 
-这还是 M1 的起点：真实模型已经完成一次手工文件任务，固定测评框架和两个文件任务也已建立。下一步是重复运行形成基线，再补需要 shell 的代码修改任务。目标见 [GOALS.md](docs/GOALS.md)，代码流程见 [TECHNICAL.md](docs/TECHNICAL.md)，设计取舍见 [DESIGN.md](docs/DESIGN.md)。
+M1 首版已经跑通：真实模型可完成文件任务和小型代码修复，3 个固定任务连续 3 轮取得 9/9 通过。后续改动应重复运行相同测评，观察成功率、轮数和失败模式是否退化。目标见 [GOALS.md](docs/GOALS.md)，代码流程见 [TECHNICAL.md](docs/TECHNICAL.md)，设计取舍见 [DESIGN.md](docs/DESIGN.md)。
