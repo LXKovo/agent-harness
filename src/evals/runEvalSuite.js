@@ -11,6 +11,16 @@ function verifyTemporaryWorkspace(workspaceRoot) {
   }
 }
 
+/** 检查详情会进入控制台与 JSON 报告；夹具可能很大，必须限长，否则报告会被文件内容淹没 */
+const MAX_DETAIL_CHARS = 200;
+
+function limitDetail(detail) {
+  const text = typeof detail === 'string' ? detail : String(detail ?? '');
+  return text.length > MAX_DETAIL_CHARS
+    ? `${text.slice(0, MAX_DETAIL_CHARS)}…（详情共 ${text.length} 字符）`
+    : text;
+}
+
 export async function runEvalCase({
   testCase,
   model,
@@ -18,6 +28,7 @@ export async function runEvalCase({
   maxTurns = 12,
   maxDurationMs = 120_000,
   maxContextChars = 120_000,
+  sandbox = null,
   onEvent,
 }) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), `agent-harness-eval-${testCase.id}-`));
@@ -28,9 +39,16 @@ export async function runEvalCase({
 
   try {
     await testCase.setup({ workspaceRoot });
+    // 沙箱模式下命令一律进容器；进程内后端仍只对显式声明 allowShell 的任务开放。
+    // 声明 requiresSandbox 的任务在没有沙箱时直接判失败，避免「工具不在」被误读成模型能力问题。
+    if (testCase.requiresSandbox && !sandbox) {
+      throw new Error('这项测评需要沙箱：请用 --docker 运行（或设置 AGENT_DOCKER_IMAGE 指向本地镜像）');
+    }
     const registry = createToolRegistry(
       { workspaceRoot },
-      { includeExecCommand: testCase.allowShell === true },
+      sandbox
+        ? { includeExecCommand: false, sandbox }
+        : { includeExecCommand: testCase.allowShell === true },
     );
     agentResult = await runAgent({
       task: testCase.task,
@@ -41,10 +59,12 @@ export async function runEvalCase({
       maxContextChars,
       onEvent: (event) => onEvent?.({ caseId: testCase.id, ...event }),
     });
-    checks = await testCase.check({ workspaceRoot, agentResult });
+    checks = (await testCase.check({ workspaceRoot, agentResult }))
+      .map((check) => ({ ...check, detail: limitDetail(check.detail) }));
   } catch (err) {
     error = err?.message ?? String(err);
-    checks.push({ name: '测评执行完成', passed: false, detail: error });
+    // 错误详情同样限长
+    checks.push({ name: '测评执行完成', passed: false, detail: limitDetail(error) });
   } finally {
     if (!keepWorkspace) {
       verifyTemporaryWorkspace(workspaceRoot);

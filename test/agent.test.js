@@ -128,6 +128,7 @@ test('轮数、上下文、协议错误与模型错误有明确终止状态', as
   const endlesslyCalling = { complete: async () => response([call('x', 'list_directory', {})]) };
   assert.equal((await runAgent({ task: '持续调用', model: endlesslyCalling, registry, maxTurns: 1 })).status,
     'max_turns');
+  // 预算 1 字符时，system、任务和工具定义本身就超限；压缩没有可省的空间，必须终止
   assert.equal((await runAgent({ task: '任务', model: endlesslyCalling, registry, maxContextChars: 1 })).status,
     'context_limit');
   assert.equal((await runAgent({ task: '任务', model: { complete: async () => response([], null) }, registry })).status,
@@ -163,4 +164,40 @@ test('OpenAI 兼容客户端传递消息、工具和取消信号，并拒绝截�
   assert.equal(requests[0].options.signal, controller.signal);
   client.chat.completions.create = async () => ({ choices: [{ message: { content: '不完整' }, finish_reason: 'length' }] });
   await assert.rejects(model.complete({ messages: [], tools: [] }), /输出长度上限/);
+});
+
+test('重试次数传到 SDK，并校验取值范围', async () => {
+  // 不注入 client 时会真实构造 SDK；这里只断言我们自己的校验与保存的配置，
+  // SDK 是否照做由 openai 库自身保证
+  const model = createOpenAICompatibleModel({
+    model: 'demo',
+    apiKey: 'test-key',
+    maxRetries: 3,
+  });
+  assert.equal(model.maxRetries, 3);
+  assert.equal(createOpenAICompatibleModel({ model: 'demo', apiKey: 'k' }).maxRetries, 0, '默认不重试');
+  const injected = createOpenAICompatibleModel({
+    model: 'demo',
+    client: { chat: { completions: { async create() { return { choices: [{ message: { content: 'ok' } }] }; } } } },
+    maxRetries: 4,
+  });
+  assert.equal(injected.maxRetries, 4);
+  // 越界是同步抛出的，必须用函数包一层给 assert.rejects
+  assert.throws(() => createOpenAICompatibleModel({ model: 'demo', apiKey: 'k', maxRetries: -1 }), /maxRetries/);
+  assert.throws(() => createOpenAICompatibleModel({ model: 'demo', apiKey: 'k', maxRetries: 9 }), /maxRetries/);
+});
+
+test('重试耗尽后的模型错误带状态码与重试次数，便于定位', async () => {
+  const registry = createToolRegistry({ workspaceRoot: workspace }, { includeExecCommand: false });
+  const error = new Error('Connection error.');
+  error.status = 503;
+  const model = createOpenAICompatibleModel({
+    model: 'demo',
+    client: { chat: { completions: { async create() { throw error; } } } },
+    maxRetries: 2,
+  });
+  const result = await runAgent({ task: '任务', model, registry });
+  assert.equal(result.status, 'model_error');
+  assert.match(result.reason, /HTTP 503/);
+  assert.match(result.reason, /已重试 2 次/);
 });

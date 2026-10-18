@@ -47,6 +47,56 @@ function createPassingFakeModel() {
         return response([], '配置已完成局部修改并复查');
       }
 
+      if (task.includes('SERVICE_TIMEOUT_MS')) {
+        if (toolMessages.length === 0) {
+          return response([
+            call('read-aurora', 'read_file', { filePath: 'src/aurora.js' }),
+            call('read-vega', 'read_file', { filePath: 'src/vega.js' }),
+          ]);
+        }
+        if (toolMessages.length === 2) {
+          assert.ok(toolMessages.every((message) => message.content.length > 0));
+          return response([call('patch-config', 'apply_patch', {
+            filePath: 'src/config.js',
+            edits: [{
+              oldText: 'export const SERVICE_TIMEOUT_MS = 30_000;',
+              newText: 'export const SERVICE_TIMEOUT_MS = 5_000;',
+            }],
+          })]);
+        }
+        if (toolMessages.length === 3) {
+          return response([call('verify-config', 'read_file', { filePath: 'src/config.js' })]);
+        }
+        assert.match(toolMessages.at(-1).content, /SERVICE_TIMEOUT_MS = 5_000/);
+        return response([], '已修改并确认：export const SERVICE_TIMEOUT_MS = 5_000;');
+      }
+
+      if (task.includes('left-pad')) {
+        // 沙箱任务的假模型分支：先跑测试拿到失败，再修，再验证网络不可用
+        if (toolMessages.length === 0) {
+          return response([call('run-tests', 'exec_command', { command: 'node --test' })]);
+        }
+        if (toolMessages.length === 1) {
+          return response([call('fix-source', 'write_file', {
+            filePath: 'src/multiply.js',
+            content: 'export function multiply(left, right) {\n  return left * right;\n}\n',
+            overwrite: true,
+          })]);
+        }
+        if (toolMessages.length === 2) {
+          return response([call('probe-network', 'exec_command', { command: 'npm run probe' })]);
+        }
+        return response([], 'npm run probe 失败：沙箱内没有网络，DNS 解析不可用。');
+      }
+
+      if (task.includes('M-6600')) {
+        if (toolMessages.length === 0) {
+          return response([call('search-token', 'search_files', { query: 'M-6600' })]);
+        }
+        assert.match(toolMessages[0].content, /config\/release\.js/);
+        return response([], '发布令牌是 W-4471');
+      }
+
       if (task.includes('node --test')) {
         if (toolMessages.length === 0) {
           return response([
@@ -93,12 +143,50 @@ function createPassingFakeModel() {
 }
 
 test('固定测评在独立临时工作区运行并自动检查结果', async () => {
-  const suite = await runEvalSuite({ cases: evalCases, model: createPassingFakeModel() });
+  // 沙箱任务在无沙箱时会明确失败，所以这里只跑不需要沙箱的那些
+  const cases = evalCases.filter((testCase) => !testCase.requiresSandbox);
+  const suite = await runEvalSuite({ cases, model: createPassingFakeModel() });
   assert.equal(suite.passed, true);
-  assert.equal(suite.passedCount, 4);
-  assert.equal(suite.totalCount, 4);
+  assert.equal(suite.passedCount, cases.length);
+  assert.equal(suite.totalCount, cases.length);
+  assert.ok(evalCases.length >= 7);
+  assert.ok(evalCases.some((testCase) => testCase.requiresSandbox), '应有需要沙箱的任务');
   assert.ok(suite.results.every((result) => result.workspaceRoot === null));
   assert.ok(suite.results.every((result) => result.checks.every((check) => check.passed)));
+});
+
+test('需要沙箱的测评在没有沙箱时明确失败，而不是静默跳过', async () => {
+  const sandboxCase = evalCases.find((testCase) => testCase.requiresSandbox);
+  const suite = await runEvalSuite({ cases: [sandboxCase], model: createPassingFakeModel() });
+  assert.equal(suite.passed, false);
+  assert.equal(suite.results[0].status, 'eval_error');
+  assert.match(suite.results[0].checks[0].detail, /需要沙箱/);
+});
+
+test('大规模夹具的合成源码保持可搜索且体积真实', async () => {
+  const source = evalCases.find((testCase) => testCase.id === 'edit-large-file');
+  const token = evalCases.find((testCase) => testCase.id === 'gather-token-across-files');
+  const root = await mkdtemp(join(tmpdir(), 'agent-harness-fixture-'));
+  const tokenRoot = await mkdtemp(join(tmpdir(), 'agent-harness-fixture-token-'));
+  try {
+    await source.setup({ workspaceRoot: root });
+    const aurora = await readFile(join(root, 'src', 'aurora.js'), 'utf8');
+    const config = await readFile(join(root, 'src', 'config.js'), 'utf8');
+    // 单个文件必须远大于 read_file 的输出上限，否则测不到「先搜索再读取」的路径
+    assert.ok(aurora.length > 60_000, `aurora.js 只有 ${aurora.length} 字符`);
+    // 目标行必须唯一，否则按字面量搜索会有歧义
+    assert.equal(config.split('SERVICE_TIMEOUT_MS = 30_000').length - 1, 1);
+    assert.equal(aurora.includes('SERVICE_TIMEOUT_MS'), false);
+    for (const line of aurora.split('\n')) assert.ok(line.length <= 120, `过长行: ${line.length}`);
+
+    await token.setup({ workspaceRoot: tokenRoot });
+    const release = await readFile(join(tokenRoot, 'config', 'release.js'), 'utf8');
+    assert.equal(release.split('W-4471').length - 1, 1);
+    assert.equal(release.includes('M-6600'), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(tokenRoot, { recursive: true, force: true });
+  }
 });
 
 test('测评失败由文件检查器决定，不采信模型的完成声明', async () => {

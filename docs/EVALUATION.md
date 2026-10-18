@@ -10,8 +10,13 @@
 | `transform-existing-file` | 读取、转换并复查已有文件 | 输入未修改，输出严格匹配，根目录无多余文件 |
 | `search-and-patch` | 搜索并局部修改已有文件 | Agent 使用 `search_files` 和 `apply_patch`，未调用 `write_file`，目标精确修改，受保护文件与目录结构不变 |
 | `repair-code-and-test` | 读取源码和测试、修复代码、运行命令 | 配置与测试未修改，Agent 调用过 `exec_command`，独立执行 `node --test` 通过，无多余文件 |
+| `edit-large-file` | 在超长源码中定位并修改单个设置 | 两个 75KB 级合成模块与 `src/config.js` 逐字节未变（除目标行），至少两次 `read_file`，使用 `apply_patch`，最终回答引用改动后的行 |
+| `gather-token-across-files` | 跨多个文件检索唯一答案 | 回答含 `W-4471`，三个夹具文件逐字节未修改，根目录无多余文件 |
+| `run-tests-in-sandbox` | 在容器沙箱里修复代码并验证网络隔离 | 源码精确修复、`package.json` 与探测脚本未改、`node --test` 通过、至少两条命令、回答说明网络不可用；只在 `--docker` 下可解 |
 
-三个文件任务不开放 shell。代码修复任务只在程序创建的一次性临时夹具中开放 `exec_command`；这仍不是进程沙箱，不能用于不可信仓库。
+文件类任务不注册命令工具。代码修复任务在进程内后端下显式开放 `exec_command`；`run-tests-in-sandbox` 需要 `--docker`，没有沙箱时直接判失败而不是跳过。
+
+`edit-large-file` 的合成模块由 `src/evals/cases.js` 现场生成：每个文件约 75KB、单行不超过 120 字符、目标行全库唯一。这样单个 `read_file` 必然触发工具自身的输出截断，模型只能「先搜索、再定向读取」，而两次长读取之和会越过压缩软阈值 —— 让压缩路径能被真实轨迹检验，而不是只在单元测试里成立。
 
 ## 2026-09-27 初始三任务基线
 
@@ -72,6 +77,66 @@
 | `repair-code-and-test` | 3/3 | 5.67 | 5465 ms |
 
 对应本地报告：`eval-results/2026-09-27T14-19-16-312Z.json`。
+
+## 2026-10-16 上下文压缩路径的真实运行
+
+增加 `edit-large-file` 与 `gather-token-across-files` 后，用同一模型验证新夹具，并单独观察压缩路径。命令为 `node src/eval.js`，`AGENT_MAX_CONTEXT_CHARS` 分别取默认值、40000 和 20000。
+
+- 模型：`deepseek-v4-flash`（Chat Completions 兼容接口）
+- 结果：三次运行的被测任务全部通过
+
+| 任务 | 上下文预算 | 通过 | 轮数 | 耗时 | 压缩事件 |
+|---|---:|---|---:|---:|---|
+| `edit-large-file` | 默认 | 1/1 | 4 | 5284 ms | 无 |
+| `gather-token-across-files` | 默认 | 1/1 | 3 | 3714 ms | 无 |
+| `edit-large-file` | 40000 | 1/1 | 6 | 8379 ms | 无 |
+| `edit-large-file` | 20000 | 1/1 | 6 | 7918 ms | 1 次（L1，省 14022 字符） |
+
+预算 20000 那次的压缩事件：`softLimit 14000`、`hardLimit 20000`、压缩后 `chars 5922`、`estimatedTokens 1298`；同一轮服务端返回的 `prompt_tokens` 为 2170，两者同量级，说明字符口径与估算 token 都只是近似。
+
+观察到的代价与恢复路径：
+
+- 压缩把两条被截断的长读取压成了引用，模型在第 3 轮重新发起 `search_files` 并做了一次定向 `read_file`，随后才 `apply_patch`。即压缩**没有**让它做错事，但确实多花了两次工具调用：同样任务从 4 轮增至 6 轮，耗时从约 5.3 秒增至约 8 秒。
+- 40000 预算那次没有触发压缩，轮数仍是 6，说明轮数差异不能只归给压缩，样本量不足以区分。
+
+对应本地报告：`eval-results/2026-10-16T08-36-39-191Z.json`（默认预算，新增两项）、`2026-10-16T08-37-03-490Z.json`（20000 预算，触发压缩）、`2026-10-16T08-37-21-774Z.json`（40000 预算）。
+
+这是首个「压缩真实生效」的证据，但仍只有单次样本，不能说压缩稳定有益或稳定无害。下一步应重复多次并统计「压缩后是否重读被省略的文件」这一行为的比例。
+
+## 2026-10-16 沙箱隔离的真实运行
+
+新增 `run-tests-in-sandbox`，用 `node src/eval.js --docker --case run-tests-in-sandbox` 运行。该任务只有在容器沙箱下可解：夹具里的依赖刻意装不上，探测脚本要联网，所以「网络不可用」本身就是隔离生效的证据。
+
+- 模型：`deepseek-v4-flash`；镜像 `node:22-alpine`（Docker 29.8.1，Linux 容器）
+- 结果：**1/1 通过**，6 轮，16.1 秒
+
+工具轨迹：读文件 → `apply_patch` 修好运算符 → `exec_command` 跑 `node --test`（容器内 0.6 秒，通过）→ `exec_command` 跑网络探测（失败）→ 回答说明沙箱内没有网络。
+
+调参记录：第一版让 Agent 直接跑 `npm install`，npm 自身的重试与超时让这一条命令耗时 86 秒，整次运行逼近 120 秒上限。改成调用带超时的探测脚本后，整次运行降到 16 秒。这说明沙箱里的失败路径也要控制耗时，否则一次失败的联网尝试就能吃掉整个预算。
+
+同一轮里还真实执行了隔离断言（`test/dockerCommand.test.js`，只有本机 Docker 与镜像可用时才跑）：工作区可写、根文件系统只读（写 `/root.txt` 被拒绝）、容器内无法解析外网域名、容器根目录没有宿主仓库内容、超时后 `docker ps` 没有残留容器。
+
+对应本地报告：`eval-results/2026-10-16T12-*.json`。
+
+隔离强度的边界：容器共享宿主内核，不是虚拟机。这些证据证明的是「配置生效」，不能证明「容器逃逸不可能」。
+
+## 2026-10-16 同轮并发执行的真实运行
+
+`runAgent` 增加同轮并发（见 [DESIGN.md](docs/DESIGN.md) D12）后，用 `node src/eval.js --case edit-large-file --case gather-token-across-files` 复核。
+
+- 模型：`deepseek-v4-flash`；默认上下文预算
+- 结果：**2/2 通过**
+
+| 任务 | 轮数 | 耗时 | 每轮调用数 | 并发轮次 |
+|---|---:|---:|---|---:|
+| `edit-large-file` | 4 | 7267 ms | `[3,1,1,0]` | 1 |
+| `gather-token-across-files` | 5 | 5165 ms | `[2,2,2,1,0]` | 3 |
+
+单次样本里 `edit-large-file` 从 5284 ms 变成 7267 ms，`gather-token-across-files` 从 3714 ms 变成 5165 ms —— **都比并发前更慢**。这是模型调用次数的波动（后者从 3 轮变成 5 轮），不是并发本身变慢：并发的收益只体现在「同一轮内多个独立调用」的墙钟时间上，而单轮的模型请求耗时占主导。判断并发是否真的省时间，需要同一任务多次重复取分布，而不是比较两次单点。
+
+`batch` 事件确认并发真的发生：`edit-large-file` 第 1 轮 3 个调用并发，`gather-token-across-files` 有三轮各 2 个调用并发。
+
+对应本地报告：`eval-results/2026-10-16T13-13-04-863Z.json`。
 
 ## 运行方式
 

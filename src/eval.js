@@ -4,12 +4,15 @@ import { createOpenAICompatibleModel } from './model/openaiCompatible.js';
 import { evalCases, selectEvalCases } from './evals/cases.js';
 import { runEvalSuite } from './evals/runEvalSuite.js';
 import { writeEvalReport } from './evals/report.js';
+import { inspectDocker } from './tools/dockerCommand.js';
+import { config } from './config.js';
 
 dotenv.config({ quiet: true });
 
 function usage() {
   return [
-    '用法: node src/eval.js [--case <id>] [--repeat <次数>] [--keep-workspaces] [--list]',
+    '用法: node src/eval.js [--case <id>] [--repeat <次数>] [--docker] [--keep-workspaces] [--list]',
+    '--docker 让命令在一次性容器内执行（只挂载工作区、根只读、无网络），需要 Docker 与 AGENT_DOCKER_IMAGE。',
     '不指定 --case 时运行全部固定测评；可以重复传入 --case。每次运行自动保存 JSON 报告。',
     `可用测评: ${evalCases.map((testCase) => testCase.id).join(', ')}`,
   ].join('\n');
@@ -26,12 +29,14 @@ function positiveInt(name, fallback) {
 function parseArgs(args) {
   const caseIds = [];
   let keepWorkspaces = false;
+  let sandbox = false;
   let repeat = 1;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === '--help' || arg === '-h') return { help: true };
     if (arg === '--list') return { list: true };
     if (arg === '--keep-workspaces') keepWorkspaces = true;
+    else if (arg === '--docker' || arg === '--sandbox') sandbox = true;
     else if (arg === '--repeat') {
       const raw = args[++index];
       repeat = Number(raw);
@@ -49,7 +54,7 @@ function parseArgs(args) {
       throw new Error(`意外参数: ${arg}`);
     }
   }
-  return { caseIds, keepWorkspaces, repeat };
+  return { caseIds, keepWorkspaces, repeat, sandbox };
 }
 
 function printSuite(suite, runNumber) {
@@ -73,10 +78,26 @@ async function main() {
 
   const cases = selectEvalCases(options.caseIds);
   const modelName = process.env.MODEL_NAME ?? process.env.OPENAI_MODEL;
+  let sandbox = null;
+  if (options.sandbox) {
+    // 沙箱模式下「命令进容器」是硬要求：拿不到 Docker 就不要声称有隔离
+    const report = await inspectDocker({ dockerBinary: config.dockerBinary, image: config.dockerImage });
+    if (!report.ok) throw new Error(report.reason);
+    sandbox = {
+      image: config.dockerImage,
+      memory: config.dockerMemory,
+      cpus: config.dockerCpus,
+      pidsLimit: config.dockerPidsLimit,
+      user: config.dockerUser,
+      dockerBinary: config.dockerBinary,
+    };
+    console.error(`沙箱: ${report.image}（Docker ${report.serverVersion}），网络关闭，仅挂载工作区`);
+  }
   const model = createOpenAICompatibleModel({
     model: modelName,
     apiKey: process.env.MODEL_API_KEY ?? process.env.OPENAI_API_KEY,
     baseURL: process.env.MODEL_BASE_URL ?? process.env.OPENAI_BASE_URL,
+    maxRetries: config.modelMaxRetries,
   });
   const startedAt = new Date();
   const runs = [];
@@ -89,11 +110,15 @@ async function main() {
       maxTurns: positiveInt('AGENT_MAX_TURNS', 12),
       maxDurationMs: positiveInt('AGENT_MAX_DURATION_MS', 120_000),
       maxContextChars: positiveInt('AGENT_MAX_CONTEXT_CHARS', 120_000),
+      sandbox,
       onEvent(event) {
         if (event.type === 'model') {
           console.error(`[${event.caseId}] 第 ${event.turn} 轮: ${event.toolCalls ?? 0} 个工具调用`);
         }
         if (event.type === 'tool') console.error(`[${event.caseId}] 工具 ${event.name}: ${event.outcome}`);
+        if (event.type === 'batch') {
+          console.error(`[${event.caseId}] 第 ${event.turn} 轮: ${event.calls} 个工具调用并发执行`);
+        }
       },
     });
     runs.push({ runNumber, ...suite });

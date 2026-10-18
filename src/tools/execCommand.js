@@ -201,8 +201,11 @@ function spawnCaptured(command, { cwd, shell, timeoutMs, maxOutputChars, termina
 
 /**
  * 把执行结果整理成一段模型能读懂的文本
+ *
+ * 导出是给 dockerCommand 复用：两种执行后端返回同一套版式，
+ * 模型看到的「成功 / 超时 / 无输出」措辞才一致，切换后端不会让它重新适应。
  */
-function formatResult({ command, cwd, result, effectiveTimeoutMs, maxOutputChars }) {
+export function formatResult({ command, cwd, result, effectiveTimeoutMs, maxOutputChars }) {
   const lines = [];
 
   if (result.timedOut) {

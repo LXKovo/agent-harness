@@ -64,4 +64,43 @@ export const config = {
   /** search_files 单次最多检查的文件数和单文件字节数 */
   maxSearchFiles: parseInt(process.env.MAX_SEARCH_FILES) || 2_000,
   maxSearchFileBytes: parseInt(process.env.MAX_SEARCH_FILE_BYTES) || 1_000_000,
+
+  /**
+   * 沙箱执行（Docker）
+   *
+   * 命令在一次性容器里跑：只挂载工作区、根文件系统只读、没有网络。
+   * 这里的是资源上限与镜像选择，不是「安全开关」——安全开关在 CLI 的 --docker。
+   */
+  dockerImage: process.env.AGENT_DOCKER_IMAGE || 'node:22-alpine',
+
+  /** 容器内存上限（docker 的 --memory 语法，如 512m、2g） */
+  dockerMemory: process.env.AGENT_DOCKER_MEMORY || '1g',
+
+  /** 容器 CPU 上限（docker 的 --cpus 语法） */
+  dockerCpus: process.env.AGENT_DOCKER_CPUS || '1',
+
+  /** 容器进程数上限：防止 fork 炸弹把宿主拖垮 */
+  dockerPidsLimit: parseInt(process.env.AGENT_DOCKER_PIDS) || 256,
+
+  /**
+   * 容器内以哪个用户运行，默认 root
+   *
+   * 挂载进来的工作区在宿主机上属于当前用户，容器里的非 root 用户
+   * 往往写不进去。隔离由容器边界负责，不由容器内的用户负责。
+   */
+  dockerUser: process.env.AGENT_DOCKER_USER || '0:0',
+
+  /** docker 可执行文件路径 */
+  dockerBinary: process.env.AGENT_DOCKER_BINARY || 'docker',
+
+  /**
+   * 模型请求的重试次数
+   *
+   * 一次网络抖动不该让整次任务失败。重试只放在模型层：模型请求幂等，
+   * 而工具可能有副作用，自动重试等于重复执行。
+   * 代价是重试会消耗总耗时预算（AGENT_MAX_DURATION_MS）。
+   */
+  modelMaxRetries: Number.isSafeInteger(Number(process.env.AGENT_MODEL_MAX_RETRIES))
+    ? Number(process.env.AGENT_MODEL_MAX_RETRIES)
+    : 2,
 };
