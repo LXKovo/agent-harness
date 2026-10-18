@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evalCases, selectEvalCases } from '../src/evals/cases.js';
@@ -18,6 +18,17 @@ function response(toolCalls, content = null) {
     message: { role: 'assistant', content, tool_calls: toolCalls },
     finishReason: toolCalls.length ? 'tool_calls' : 'stop',
   };
+}
+
+async function listFiles(root, prefix = '') {
+  const entries = await readdir(join(root, prefix), { withFileTypes: true });
+  const collected = [];
+  for (const entry of entries) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) collected.push(...await listFiles(root, relativePath));
+    else collected.push(relativePath);
+  }
+  return collected;
 }
 
 function createPassingFakeModel() {
@@ -89,6 +100,18 @@ function createPassingFakeModel() {
         return response([], 'npm run probe 失败：沙箱内没有网络，DNS 解析不可用。');
       }
 
+      if (task.includes('EU_WEST_3_ENDPOINT')) {
+        if (toolMessages.length === 0) {
+          return response([call('search-endpoint', 'search_files', { query: 'EU_WEST_3_ENDPOINT' })]);
+        }
+        if (toolMessages.length === 1) {
+          assert.match(toolMessages[0].content, /edge-3\.js/);
+          return response([call('read-endpoint', 'read_file', { filePath: 'src/services/edge/edge-3.js' })]);
+        }
+        assert.match(toolMessages.at(-1).content, /EU_WEST_3_ENDPOINT/);
+        return response([], '定义在 src/services/edge/edge-3.js，值是 https://api.eu-west-3.harness.example/v2');
+      }
+
       if (task.includes('M-6600')) {
         if (toolMessages.length === 0) {
           return response([call('search-token', 'search_files', { query: 'M-6600' })]);
@@ -149,7 +172,7 @@ test('固定测评在独立临时工作区运行并自动检查结果', async ()
   assert.equal(suite.passed, true);
   assert.equal(suite.passedCount, cases.length);
   assert.equal(suite.totalCount, cases.length);
-  assert.ok(evalCases.length >= 7);
+  assert.ok(evalCases.length >= 8);
   assert.ok(evalCases.some((testCase) => testCase.requiresSandbox), '应有需要沙箱的任务');
   assert.ok(suite.results.every((result) => result.workspaceRoot === null));
   assert.ok(suite.results.every((result) => result.checks.every((check) => check.passed)));
@@ -186,6 +209,34 @@ test('大规模夹具的合成源码保持可搜索且体积真实', async () =>
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(tokenRoot, { recursive: true, force: true });
+  }
+});
+
+test('大面积探索夹具越过上下文预算，目标常量全库唯一', async () => {
+  const exploration = evalCases.find((testCase) => testCase.id === 'explore-large-repo');
+  assert.ok(exploration, '应注册 explore-large-repo');
+  const root = await mkdtemp(join(tmpdir(), 'agent-harness-fixture-explore-'));
+  try {
+    await exploration.setup({ workspaceRoot: root });
+    const files = await listFiles(root);
+    assert.equal(files.length, 61, '应为 60 个模块加一个 README');
+    let totalChars = 0;
+    let needleHits = 0;
+    let endpointHits = 0;
+    for (const path of files) {
+      const content = await readFile(join(root, path), 'utf8');
+      totalChars += content.length;
+      needleHits += content.split('EU_WEST_3_ENDPOINT').length - 1;
+      endpointHits += content.split('_ENDPOINT').length - 1;
+    }
+    // 通读全部文件必然越过 120000 字符的默认硬预算，只能靠检索定位
+    assert.ok(totalChars > 130_000, `夹具合计只有 ${totalChars} 字符`);
+    // 精确搜索唯一命中；宽泛搜索会撞上 8 个诱饵
+    assert.equal(needleHits, 1);
+    assert.equal(endpointHits, 9);
+    assert.ok(files.includes('src/services/edge/edge-3.js'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

@@ -209,6 +209,99 @@ const RELEASE_CONFIG = [
   '',
 ].join('\n');
 
+/**
+ * 大面积探索夹具：60 个模块，总量越过上下文硬预算
+ *
+ * 目的不是「模型会不会写代码」，而是检验单 Agent 在「必须检索、不能通读」
+ * 的仓库里能否找到唯一真值：全部模块合计远超 120000 字符预算，逐个通读必然
+ * 触发压缩；正确路径是先 search_files 定位、再定向 read_file。
+ *
+ * 夹具里还有 8 个同形常量做诱饵：宽泛搜索 `_ENDPOINT` 会命中 9 处，
+ * 只有精确搜索常量名才能唯一命中。这条路径若稳定失败，才是引入子 Agent 的
+ * 证据（准入条件见 DESIGN.md D14）。
+ */
+const EXPLORATION_AREAS = [
+  { area: 'edge', pad: 'E' },
+  { area: 'billing', pad: 'B' },
+  { area: 'search', pad: 'S' },
+  { area: 'jobs', pad: 'J' },
+  { area: 'auth', pad: 'A' },
+  { area: 'catalog', pad: 'C' },
+];
+const EXPLORATION_MODULES_PER_AREA = 10;
+
+/** 目标常量放在 edge-3，其余 8 个是同形诱饵，值互不相同 */
+const EXPLORATION_ENDPOINTS = [
+  { area: 'edge', index: 0, name: 'EU_WEST_1_ENDPOINT', value: 'https://api.eu-west-1.harness.example/v1' },
+  { area: 'edge', index: 3, name: 'EU_WEST_3_ENDPOINT', value: 'https://api.eu-west-3.harness.example/v2' },
+  { area: 'edge', index: 9, name: 'EU_WEST_2_ENDPOINT', value: 'https://api.eu-west-2.harness.example/v1' },
+  { area: 'billing', index: 2, name: 'EU_CENTRAL_1_ENDPOINT', value: 'https://api.eu-central-1.harness.example/v1' },
+  { area: 'billing', index: 8, name: 'EU_SOUTH_1_ENDPOINT', value: 'https://api.eu-south-1.harness.example/v1' },
+  { area: 'search', index: 5, name: 'US_EAST_1_ENDPOINT', value: 'https://api.us-east-1.harness.example/v1' },
+  { area: 'jobs', index: 1, name: 'AP_SOUTH_1_ENDPOINT', value: 'https://api.ap-south-1.harness.example/v1' },
+  { area: 'auth', index: 7, name: 'US_WEST_2_ENDPOINT', value: 'https://api.us-west-2.harness.example/v1' },
+  { area: 'catalog', index: 4, name: 'EU_NORTH_1_ENDPOINT', value: 'https://api.eu-north-1.harness.example/v1' },
+];
+
+const EXPLORATION_README = [
+  '# 服务仓库',
+  '',
+  'src/services 下按区域分为六个目录，共 60 个服务模块。',
+  '每个模块导出一个处理函数和一个归一化函数。',
+  '',
+  '维护约定：查找常量请使用检索工具，不要逐个文件通读。',
+  '',
+].join('\n');
+
+function buildExplorationFiles() {
+  const files = new Map();
+  for (const { area, pad } of EXPLORATION_AREAS) {
+    for (let index = 0; index < EXPLORATION_MODULES_PER_AREA; index += 1) {
+      files.set(
+        `src/services/${area}/${area}-${index}.js`,
+        buildLargeModule({
+          name: `${area}${index}`,
+          title: `${area} 区域模块 ${index}`,
+          sections: 10,
+          pad,
+        }),
+      );
+    }
+  }
+  for (const endpoint of EXPLORATION_ENDPOINTS) {
+    const path = `src/services/${endpoint.area}/${endpoint.area}-${endpoint.index}.js`;
+    // buildLargeModule 以换行结尾，这里直接追加，保证常量独占一行、可被字面量搜索命中
+    files.set(path, `${files.get(path)}export const ${endpoint.name} = '${endpoint.value}';\n`);
+  }
+  files.set('README.md', EXPLORATION_README);
+  return files;
+}
+
+const EXPLORATION_FILES = buildExplorationFiles();
+const EXPLORATION_TARGET = EXPLORATION_ENDPOINTS.find(
+  (endpoint) => endpoint.name === 'EU_WEST_3_ENDPOINT',
+);
+
+/** 夹具可能很大，60 个文件逐条检查会把报告和终端淹掉，这里聚合成一条 */
+async function unchangedFiles(workspaceRoot, files) {
+  const mismatched = [];
+  for (const [path, expected] of files) {
+    try {
+      const actual = await readFile(join(workspaceRoot, path), 'utf8');
+      if (actual !== expected) mismatched.push(path);
+    } catch {
+      mismatched.push(`${path}(缺失)`);
+    }
+  }
+  return {
+    name: `${files.size} 个夹具文件逐字节未变`,
+    passed: mismatched.length === 0,
+    detail: mismatched.length
+      ? `有 ${mismatched.length} 个文件被改动: ${mismatched.slice(0, 5).join(', ')}`
+      : `${files.size} 个文件全部未修改`,
+  };
+}
+
 export const evalCases = [
   {
     id: 'create-exact-file',
@@ -462,6 +555,56 @@ export const evalCases = [
         await exactFile(workspaceRoot, 'docs.md', RELEASE_NOTES),
         await exactFile(workspaceRoot, 'src/registry.js', REGISTRY_SOURCE),
         await exactRootEntries(workspaceRoot, ['config', 'docs.md', 'src']),
+      ];
+    },
+  },
+  {
+    id: 'explore-large-repo',
+    title: '在 60 个模块中定位唯一端点常量',
+    task: [
+      '这个仓库有 60 个服务模块，按区域分布在 src/services 下。',
+      '请找出常量 EU_WEST_3_ENDPOINT 定义在哪个文件，并写出它的完整值。',
+      '最终回答必须同时包含定义它的文件路径和值本身。',
+      '不要修改任何文件。',
+    ].join(''),
+    async setup({ workspaceRoot }) {
+      await mkdir(join(workspaceRoot, 'src', 'services'), { recursive: true });
+      for (const { area } of EXPLORATION_AREAS) {
+        await mkdir(join(workspaceRoot, 'src', 'services', area));
+      }
+      await Promise.all(
+        [...EXPLORATION_FILES].map(([path, content]) => writeFile(join(workspaceRoot, path), content, 'utf8')),
+      );
+    },
+    async check({ workspaceRoot, agentResult }) {
+      const answer = agentResult?.answer ?? '';
+      const toolNames = agentResult?.events
+        .filter((event) => event.type === 'tool')
+        .map((event) => event.name) ?? [];
+      const writes = toolNames.filter((name) => name === 'write_file' || name === 'apply_patch');
+      return [
+        {
+          name: '回答包含端点常量的完整值',
+          passed: answer.includes(EXPLORATION_TARGET.value),
+          detail: `期望包含 ${EXPLORATION_TARGET.value}；回答: ${answer.slice(0, 120)}`,
+        },
+        {
+          name: '回答指出定义该常量的文件',
+          passed: /edge-3\.js/.test(answer),
+          detail: `期望提到 edge-3.js；回答: ${answer.slice(0, 120)}`,
+        },
+        {
+          name: 'Agent 用检索定位而不是通读',
+          passed: toolNames.includes('search_files'),
+          detail: `工具调用: ${toolNames.join(', ') || '(无)'}`,
+        },
+        {
+          name: 'Agent 没有修改文件',
+          passed: writes.length === 0,
+          detail: writes.length ? `检测到写操作: ${writes.join(', ')}` : '未调用写工具',
+        },
+        await unchangedFiles(workspaceRoot, EXPLORATION_FILES),
+        await exactRootEntries(workspaceRoot, ['README.md', 'src']),
       ];
     },
   },

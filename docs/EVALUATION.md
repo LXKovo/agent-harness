@@ -12,6 +12,7 @@
 | `repair-code-and-test` | 读取源码和测试、修复代码、运行命令 | 配置与测试未修改，Agent 调用过 `exec_command`，独立执行 `node --test` 通过，无多余文件 |
 | `edit-large-file` | 在超长源码中定位并修改单个设置 | 两个 75KB 级合成模块与 `src/config.js` 逐字节未变（除目标行），至少两次 `read_file`，使用 `apply_patch`，最终回答引用改动后的行 |
 | `gather-token-across-files` | 跨多个文件检索唯一答案 | 回答含 `W-4471`，三个夹具文件逐字节未修改，根目录无多余文件 |
+| `explore-large-repo` | 在 60 个模块的仓库里定位唯一端点常量 | 回答含端点值 `https://api.eu-west-3.harness.example/v2` 与文件 `edge-3.js`，61 个夹具文件逐字节未变，使用了 `search_files`，没有写操作 |
 | `run-tests-in-sandbox` | 在容器沙箱里修复代码并验证网络隔离 | 源码精确修复、`package.json` 与探测脚本未改、`node --test` 通过、至少两条命令、回答说明网络不可用；只在 `--docker` 下可解 |
 
 文件类任务不注册命令工具。代码修复任务在进程内后端下显式开放 `exec_command`；`run-tests-in-sandbox` 需要 `--docker`，没有沙箱时直接判失败而不是跳过。
@@ -137,6 +138,18 @@
 `batch` 事件确认并发真的发生：`edit-large-file` 第 1 轮 3 个调用并发，`gather-token-across-files` 有三轮各 2 个调用并发。
 
 对应本地报告：`eval-results/2026-10-16T13-13-04-863Z.json`。
+
+## 2026-10-19 子 Agent 准入实验（夹具已建，尚未跑真实模型）
+
+新增 `explore-large-repo`，用来回答 [DESIGN.md](./DESIGN.md) D14 的准入问题：单 Agent 能否只靠 `search_files` 加定向 `read_file` 在 60 个模块里找到唯一真值，而不需要子 Agent。
+
+夹具形状（离线测试已验证）：
+
+- 60 个服务模块分布在 `src/services` 下六个区域目录，合计约 150KB，**超过 120000 字符的默认硬预算**；逐个通读必然触发压缩，正确路径是先检索再定向读取。
+- 目标常量 `EU_WEST_3_ENDPOINT` 全库唯一（值 `https://api.eu-west-3.harness.example/v2`）；另有 8 个同形诱饵端点，宽泛搜索 `_ENDPOINT` 命中 9 处，精确搜索常量名命中 1 处。
+- 检查器要求：回答同时含值与文件名、61 个夹具文件逐字节未变、实际调用过 `search_files`、没有任何写操作。
+
+**目前只有夹具形状的证据，还没有真实模型轨迹。** 因此这份实验现在不能支持「单 Agent 会失败」，也不能支持「需要子 Agent」。下一步用 `pnpm run eval --case explore-large-repo --repeat 5` 取分布，再看轮数、压缩事件与是否重读被省略的内容。
 
 ## 运行方式
 
