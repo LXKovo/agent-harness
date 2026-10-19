@@ -54,7 +54,9 @@ export async function runEvalCase({
       task: testCase.task,
       model,
       registry,
-      maxTurns,
+      // 用例可以声明更紧或更宽的轮数预算：不同任务需要的轮数不同，
+      // 用全局上限去卡「读取 24 个模块」这类任务，只会把轮数变成噪音
+      maxTurns: testCase.maxTurns ?? maxTurns,
       maxDurationMs,
       maxContextChars,
       onEvent: (event) => onEvent?.({ caseId: testCase.id, ...event }),

@@ -282,6 +282,90 @@ const EXPLORATION_TARGET = EXPLORATION_ENDPOINTS.find(
   (endpoint) => endpoint.name === 'EU_WEST_3_ENDPOINT',
 );
 
+/**
+ * 「必须通读」夹具：24 个大型模块，合计约 134KB
+ *
+ * 与 explore-large-repo 互补：那个任务点名了常量，一次精确字面量搜索就能定位，
+ * 所以它只能检验「会不会用检索」。这个任务要比较每个模块首行审计记录里的 weight，
+ * 而审计行是固定宽度的单行记录，weight 位于行首 300 字符之后 —— search_files
+ * 的预览只回显每行前 300 字符，检索因此拿不到权重，只能 read_file 逐个读取。
+ *
+ * 为什么审计行放在文件开头、weight 又控制在 1200 字符以内：L1 压缩会把工具结果
+ * 截到 1200 字符，放在更深处会同时测到「压缩截断」和「要不要通读」两件事，
+ * 失败时无法归因。这里刻意只保留一个变量 —— 必须逐个读文件。
+ *
+ * 24 个文件合计越过 120000 字符的默认硬预算，读取过程必然触发上下文压缩，
+ * 这正是要观察的场景：压缩之后模型还能不能保住「目前见过的最大值」。
+ */
+const SWEEP_AREAS = ['edge', 'billing', 'search', 'jobs', 'auth', 'catalog'];
+const SWEEP_MODULES_PER_AREA = 4;
+const SWEEP_SECTIONS = 20;
+const SWEEP_AUDIT_PREFIX = '// audit: ';
+const SWEEP_AUDIT_SEAL_LENGTH = 280;
+const SWEEP_MAX = { area: 'jobs', index: 2, weight: 6421 };
+
+/** 除最大值外，权重是 10..46 的小整数，比较时不容易和封条里的数字混淆 */
+function sweepWeight(areaIndex, index) {
+  return 10 + ((areaIndex * 7 + index * 13) % 37);
+}
+
+/** 确定性噪声：同样的种子永远得到同样的封条，夹具因此每次运行都逐字节一致 */
+function sweepSeal(seed) {
+  let state = 2166136261;
+  for (const char of seed) state = Math.imul(state ^ char.charCodeAt(0), 16777619) >>> 0;
+  let seal = '';
+  for (let index = 0; index < SWEEP_AUDIT_SEAL_LENGTH; index += 1) {
+    state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+    seal += '0123456789abcdef'[state % 16];
+  }
+  return seal;
+}
+
+function buildSweepModule({ area, areaIndex, index }) {
+  const name = `${area}${index}`;
+  const source = buildLargeModule({
+    name,
+    title: `${area} 区域模块 ${index}`,
+    sections: SWEEP_SECTIONS,
+    pad: area[0].toUpperCase(),
+  });
+  const module = `${area}-${index}.js`;
+  const weight = area === SWEEP_MAX.area && index === SWEEP_MAX.index
+    ? SWEEP_MAX.weight
+    : sweepWeight(areaIndex, index);
+  // 审计行独占文件第一行：search_files 按行回显前 300 字符，权重因此不在检索结果里；
+  // 而它整行不到 400 字符，read_file 的内容即使被 L1 截到 1200 字符也仍完整。
+  return `${SWEEP_AUDIT_PREFIX}{"module":"${module}","seal":"${sweepSeal(module)}","weight":${weight}}\n${source}`;
+}
+
+const SWEEP_FILES = new Map();
+for (const [areaIndex, area] of SWEEP_AREAS.entries()) {
+  for (let index = 0; index < SWEEP_MODULES_PER_AREA; index += 1) {
+    SWEEP_FILES.set(
+      `src/services/${area}/${area}-${index}.js`,
+      buildSweepModule({ area, areaIndex, index }),
+    );
+  }
+}
+SWEEP_FILES.set('README.md', [
+  '# 服务仓库',
+  '',
+  `src/services 下按区域分为六个目录，共 ${SWEEP_AREAS.length * SWEEP_MODULES_PER_AREA} 个服务模块。`,
+  '每个模块开头有一行以 `// audit: ` 开头的审计记录，单行固定宽度，记录模块的配置权重。',
+  '',
+  '维护约定：审计记录由导出脚本生成，不要手工修改。',
+  '',
+].join('\n'));
+
+const SWEEP_MAX_PATH = `src/services/${SWEEP_MAX.area}/${SWEEP_MAX.area}-${SWEEP_MAX.index}.js`;
+
+/** 供离线测试与假模型使用，避免测试里重复写死夹具形状 */
+export const sweepAuditFixture = {
+  modules: [...SWEEP_FILES.keys()].filter((path) => path !== 'README.md'),
+  maxPath: SWEEP_MAX_PATH,
+  maxWeight: SWEEP_MAX.weight,
+};
+
 /** 夹具可能很大，60 个文件逐条检查会把报告和终端淹掉，这里聚合成一条 */
 async function unchangedFiles(workspaceRoot, files) {
   const mismatched = [];
@@ -605,6 +689,47 @@ export const evalCases = [
         },
         await unchangedFiles(workspaceRoot, EXPLORATION_FILES),
         await exactRootEntries(workspaceRoot, ['README.md', 'src']),
+      ];
+    },
+  },
+  {
+    id: 'sweep-audit-weights',
+    title: '在 24 个大型模块中比对配置权重',
+    // 24 次读取按每轮 4-6 个并发，默认 12 轮不够用。放宽轮数是为了让「上下文」
+    // 而不是「轮数」成为变量：否则失败只能说明轮数太少，得不出任何结论。
+    maxTurns: 16,
+    task: [
+      '这个仓库有 24 个服务模块，按区域分布在 src/services 下。',
+      '每个模块开头有一行以 // audit: 开头的单行审计记录，其中 weight 字段是该模块的配置权重。',
+      '请找出 weight 最大的模块，回答它的文件路径和 weight 值。',
+      '不要修改现有文件；如果需要记录中间结果，可以新建临时文件。',
+    ].join(''),
+    async setup({ workspaceRoot }) {
+      await mkdir(join(workspaceRoot, 'src', 'services'), { recursive: true });
+      for (const area of SWEEP_AREAS) {
+        await mkdir(join(workspaceRoot, 'src', 'services', area));
+      }
+      await Promise.all(
+        [...SWEEP_FILES].map(([path, content]) => writeFile(join(workspaceRoot, path), content, 'utf8')),
+      );
+    },
+    async check({ workspaceRoot, agentResult }) {
+      const answer = agentResult?.answer ?? '';
+      // 只看结果，不要求「必须读了多少个文件」：首轮 5 次真实运行里，有一轮用
+      // search_files 的「命中 / 未命中」逐位试探出了权重，只读了 3 个文件却答对了。
+      // 那是工具的合法用法，按策略判分等于把「我预期的解法」当成对错标准。
+      return [
+        {
+          name: '回答指出 weight 最大的模块',
+          passed: new RegExp(`${SWEEP_MAX.area}-${SWEEP_MAX.index}\\.js`).test(answer),
+          detail: `期望提到 ${SWEEP_MAX.area}-${SWEEP_MAX.index}.js；回答: ${answer.slice(0, 120)}`,
+        },
+        {
+          name: `回答包含最大权重 ${SWEEP_MAX.weight}`,
+          passed: answer.includes(String(SWEEP_MAX.weight)),
+          detail: `期望包含 ${SWEEP_MAX.weight}；回答: ${answer.slice(0, 120)}`,
+        },
+        await unchangedFiles(workspaceRoot, SWEEP_FILES),
       ];
     },
   },
