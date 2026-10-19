@@ -16,9 +16,15 @@
  *   L2 仍超预算时把上限收严到 maxToolResultCharsStrict（默认为上一级的 1/6）
  *   L3 把保护窗口之前的工具结果整体换成引用（原始调用参数仍在 assistant 消息里）
  *   L4 丢弃中间整轮对话，并留下明确的「已省略」标记
+ *   L5/L6 应急截断：连保护窗口内的结果也截断，仅在窗口本身就让上下文超过硬预算时使用
  *
  * 为什么要分 L1 / L2 两级截断：一次就截到很短的阈值会丢掉模型正在用的细节。
  * 先按宽松上限压缩，只有不够时才继续加严，压缩强度与上下文压力成正比。
+ *
+ * 为什么 L1/L2 要跳过保护窗口：工具结果产生后，模型要到下一轮才看得到；
+ * 如果这一轮就先把它截到 1200 字符，模型永远看不到尾部 —— 保护窗口承诺的
+ * 「模型正在依据这些结果决定下一步」就成了空话。L5/L6 是唯一的例外：
+ * 窗口本身超过硬预算时，只能截短，否则整次运行会被硬闸门终止。
  */
 
 const CJK = /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/;
@@ -219,10 +225,13 @@ export function compactMessages({
   };
 
   /** L1/L2 共用的截断：把超过 maxChars 的工具结果压到上限以内 */
-  const truncateToolResults = (maxChars) => (input) => {
+  const truncateToolResults = (maxChars, includeProtected = false) => (input) => {
     let changed = false;
-    const next = input.map((message) => {
+    const next = input.map((message, index) => {
       if (message.role !== 'tool' || typeof message.content !== 'string') return message;
+      // 保护窗口内的结果不动：模型还没看到它，这一轮就截掉等于没读到。
+      // 只有应急级别（L5/L6）才允许 includeProtected。
+      if (!includeProtected && index >= protectedFrom) return message;
       if (message.content.length <= maxChars) return message;
       // 只有「按更严的上限再截一次」才有意义：已经截到更短的就不再动它
       const already = truncatedAt(message.content);
@@ -289,6 +298,16 @@ export function compactMessages({
         ...input.slice(boundary),
       ];
     });
+  }
+
+  // L5/L6：应急。前四级都不碰保护窗口，所以「窗口本身就让上下文超过硬预算」时它们
+  // 无能为力。与其让 runAgent 以 context_limit 终止整次任务，不如让模型看到被截短的结果：
+  // 截断只损失细节，终止损失的是整轮任务。先按 L1 的上限，仍超硬预算再收到 L2 的上限。
+  if (estimateContextChars(working, tools) > maxContextChars) {
+    applyLevel(5, truncateToolResults(maxToolResultChars, true));
+  }
+  if (estimateContextChars(working, tools) > maxContextChars) {
+    applyLevel(6, truncateToolResults(maxToolResultCharsStrict, true));
   }
 
   result.compacted = working !== current;

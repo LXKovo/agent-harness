@@ -135,79 +135,96 @@ test('预算宽裕时不做任何压缩', () => {
 test('L1 先用工具自己的 compact 处理器，再按上限兜底截断', () => {
   const registry = stubRegistry(5000, { compact: (result) => result.slice(0, 500) });
   const messages = history(3, 5000);
-  // 软阈值只允许第一级触发
-  const result = compactMessages({ messages, ...compactionOptions(registry, 8000, { softChars: 2500 }) });
+  // 软阈值只允许第一级触发；最后一个结果在保护窗口内，必须保持原样
+  const result = compactMessages({ messages, ...compactionOptions(registry, 8000, { softChars: 7000 }) });
   assert.deepEqual(result.actions.map((action) => action.level), [1]);
   assertToolPairingIntact(result.messages);
   assert.equal(toolIds(result.messages).length, 3);
   const contents = result.messages.filter((message) => message.role === 'tool')
     .map((message) => message.content);
+  const outsideWindow = contents.slice(0, 2);
   // 处理器给出 500，上限是 200，所以最终按 200 截断，标记必须写实际长度
-  assert.ok(contents.every((content) => content.length === 231));
-  assert.ok(contents.every((content) => content.includes('已截断到 200 字符')),
+  assert.ok(outsideWindow.every((content) => content.length === 231));
+  assert.ok(outsideWindow.every((content) => content.includes('已截断到 200 字符')),
     '标记必须写实际生效的上限，不能沿用处理器的返回长度');
+  assert.equal(contents.at(-1).length, 5000, '保护窗口内刚读到的结果不能被截断');
 });
 
 test('处理器已经压到上限以内时不再加截断标记', () => {
   // 处理器恰好压到上限（200），此时不应再追加截断标记
   const registry = stubRegistry(5000, { compact: (result) => result.slice(0, 200) });
   const messages = history(3, 5000);
-  const result = compactMessages({ messages, ...compactionOptions(registry, 8000, { softChars: 2000 }) });
+  const result = compactMessages({ messages, ...compactionOptions(registry, 8000, { softChars: 7000 }) });
   assert.deepEqual(result.actions.map((action) => action.level), [1]);
   const contents = result.messages.filter((message) => message.role === 'tool')
     .map((message) => message.content);
-  assert.ok(contents.every((content) => content.length === 200), '处理器结果应被原样采用');
-  assert.ok(contents.every((content) => !content.includes(TRUNCATION)), '未截断就不该有标记');
+  assert.ok(contents.slice(0, 2).every((content) => content.length === 200), '处理器结果应被原样采用');
+  assert.ok(contents.slice(0, 2).every((content) => !content.includes(TRUNCATION)), '未截断就不该有标记');
+  assert.equal(contents.at(-1).length, 5000);
 });
 
 test('L2 会按更严的上限重新截断 L1 的结果', () => {
-  const messages = history(3, 3000);
+  const messages = history(20, 800);
   // 软阈值卡在第二级之后：第三、四级来不及触发
-  const result = compactMessages({ messages, ...compactionOptions(null, 6000, { softChars: 1300 }) });
+  const result = compactMessages({ messages, ...compactionOptions(null, 100_000, { softChars: 8000 }) });
   assert.deepEqual(result.actions.map((action) => action.level), [1, 2]);
-  assert.ok(result.messages.filter((message) => message.role === 'tool')
+  assert.ok(result.messages.filter((message) => message.role === 'tool'
+    && message.tool_call_id !== 'c19')
     .every((message) => message.content.includes('已截断到 33 字符')),
   '第二级应把上限收严到 maxToolResultChars 的 1/6');
+  assert.equal(result.messages.at(-1).content.length, 800, '保护窗口内的结果不参与前两级');
   assertToolPairingIntact(result.messages);
 });
 
 test('L3 只把保护窗口之前的工具结果换成引用', () => {
-  const messages = history(4, 3000);
-  // 第二级之后仍有 1618 字符，超过 1400 的软阈值，所以第三级会触发；第三级之后降到阈值以内
-  const result = compactMessages({ messages, ...compactionOptions(null, 6000, { softChars: 1400 }) });
+  const messages = history(20, 3000);
+  // 第二级之后仍超软阈值，所以第三级会触发；第三级之后降到阈值以内
+  const result = compactMessages({ messages, ...compactionOptions(null, 100_000, { softChars: 9300 }) });
   assert.deepEqual(result.actions.map((action) => action.level), [1, 2, 3]);
   const references = result.messages.filter((message) => message.role === 'tool'
     && message.content.startsWith(REFERENCE));
-  assert.deepEqual(references.map((message) => message.tool_call_id), ['c0', 'c1', 'c2']);
-  assert.equal(toolIds(result.messages).length, 4, '被换成引用的工具结果仍留在原位');
-  assert.ok(result.messages.at(-1).content.includes(TRUNCATION), '最近一轮的工具结果必须保留内容');
+  assert.deepEqual(references.map((message) => message.tool_call_id),
+    Array.from({ length: 19 }, (_, index) => `c${index}`));
+  assert.equal(toolIds(result.messages).length, 20, '被换成引用的工具结果仍留在原位');
+  assert.equal(result.messages.at(-1).content.length, 3000, '最近一轮的工具结果必须原样保留');
   assertToolPairingIntact(result.messages);
 });
 
-test('保护窗口按 keepRecentTurns 保留最近 N 次交换', () => {
+test('保护窗口按 keepRecentTurns 保留最近 N 次交换，且窗口内结果不被截断', () => {
   const messages = history(6, 6000);
-  const one = compactMessages({ messages, ...compactionOptions(null, 5000, { softChars: 100 }) });
+  const one = compactMessages({ messages, ...compactionOptions(null, 100_000, { softChars: 100 }) });
   assert.deepEqual(toolIds(one.messages), ['c5'], 'keepRecentTurns=1 只保留最近一次交换');
-  assert.ok(one.messages.at(-1).content.includes(TRUNCATION));
+  assert.equal(one.messages.at(-1).content.length, 6000, '保护窗口内的结果不能被截断');
   assertToolPairingIntact(one.messages);
 
   const two = compactMessages({
-    messages, ...compactionOptions(null, 5000, { softChars: 100, keepRecentTurns: 2 }),
+    messages, ...compactionOptions(null, 100_000, { softChars: 100, keepRecentTurns: 2 }),
   });
   assert.deepEqual(toolIds(two.messages), ['c4', 'c5']);
 
   const three = compactMessages({
-    messages, ...compactionOptions(null, 5000, { softChars: 100, keepRecentTurns: 3 }),
+    messages, ...compactionOptions(null, 100_000, { softChars: 100, keepRecentTurns: 3 }),
   });
   assert.deepEqual(toolIds(three.messages), ['c3', 'c4', 'c5']);
   assert.ok(two.estimate.chars > one.estimate.chars, '保护更多交换时占用应更大');
   assert.ok(three.estimate.chars > two.estimate.chars);
 });
 
+test('保护窗口本身超过硬预算时应急截断，而不是直接终止', () => {
+  const messages = history(1, 6000);
+  const result = compactMessages({ messages, ...compactionOptions(null, 3000, { softChars: 100 }) });
+  // 唯一的交换就在保护窗口里，前四级都动不了它，只能走第五级应急截断
+  assert.deepEqual(result.actions.map((action) => action.level), [5]);
+  assert.ok(result.estimate.chars <= 3000, '应急截断后必须回到硬预算以内');
+  assert.ok(result.messages.at(-1).content.includes(TRUNCATION));
+  assertToolPairingIntact(result.messages);
+});
+
 test('逐级加严：截断不够时先收严，再换引用，最后丢弃整段历史', () => {
   const registry = stubRegistry();
   const messages = history(6, 6000);
-  const result = compactMessages({ messages, ...compactionOptions(registry, 5000, { softChars: 100 }) });
+  // 硬预算放大，避免窗口本身触发第五级应急截断：本用例只验证前四级
+  const result = compactMessages({ messages, ...compactionOptions(registry, 100_000, { softChars: 100 }) });
   assert.deepEqual(result.actions.map((action) => action.level), [1, 2, 3, 4]);
   assert.ok(result.actions.every((action) => action.savedChars > 0));
   assertToolPairingIntact(result.messages);
@@ -233,13 +250,15 @@ test('压缩是幂等的：再次运行不会继续丢消息', () => {
   assert.deepEqual(second.actions, []);
 });
 
-test('没有可丢弃的整轮时只做截断，不产生省略标记', () => {
+test('没有可丢弃的整轮时只做应急截断，不产生省略标记', () => {
   const messages = history(2, 6000);
+  // 两次交换都在保护窗口内，前四级动不了它们，只能走第五级应急截断
   const result = compactMessages({
     messages, ...compactionOptions(null, 3000, { softChars: 100, keepRecentTurns: 2 }),
   });
   assert.equal(result.compacted, true);
-  assert.deepEqual(result.actions.map((action) => action.level), [1, 2]);
+  assert.deepEqual(result.actions.map((action) => action.level), [5]);
+  assert.ok(result.estimate.chars <= 3000);
   assertToolPairingIntact(result.messages);
   assert.equal(result.messages.some((message) => typeof message.content === 'string'
     && message.content.startsWith(DROPPED)), false);
@@ -306,9 +325,45 @@ test('运行中达到软阈值会压缩历史并继续，不终止任务', async
   assert.ok(estimateContextChars(finalMessages, []) < totalTurns * payloadLength);
 });
 
+test('刚读到的长结果，在模型第一次看到它的那一轮必须完整', async () => {
+  // 回归用例：结果产生后模型要到下一轮才看得到。如果这一轮就先把它截到 1200 字符，
+  // 模型永远读不到尾部 —— 这正是 24 模块夹具把审计行放在文件末尾时踩到的坑。
+  const registry = new ToolRegistry();
+  const payload = `${'a'.repeat(5900)}TAIL-TOKEN`;
+  registry.register({
+    name: 'tail_read', description: '返回带尾部标记的长文本', schema: z.object({}),
+    async invoke() { return payload; },
+    async invokeResult() { return { status: 'success', content: payload, truncated: false }; },
+  });
+  let index = 0;
+  const observedLast = [];
+  const model = {
+    async complete({ messages }) {
+      const tools = messages.filter((message) => message.role === 'tool');
+      if (tools.length) observedLast.push(tools.at(-1).content);
+      if (index++ < 3) return response([call(`tail-${index}`, 'tail_read', {})]);
+      return response([], '完成');
+    },
+  };
+  const result = await runAgent({
+    task: '连续读取大数据文件', model, registry, maxTurns: 6,
+    // 每轮读 6KB，软阈值 10000：第三轮起就会压缩，把更早的结果截掉
+    maxContextChars: 20_000, softContextRatio: 0.5, keepRecentTurns: 1,
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(observedLast.length, 3);
+  for (const [turn, content] of observedLast.entries()) {
+    assert.ok(content.includes('TAIL-TOKEN'),
+      `第 ${turn + 1} 次看到的最近结果必须完整，实际长度 ${content.length}`);
+    assert.ok(content.length > 5000, `第 ${turn + 1} 次看到的结果被提前截断了`);
+  }
+  const contextEvents = result.events.filter((event) => event.type === 'context');
+  assert.ok(contextEvents.length >= 1, '本用例必须真的触发过压缩');
+});
+
 test('多次丢弃时「已省略轮数」累计而不是被覆盖', () => {
   const messages = history(8, 6000);
-  const options = compactionOptions(null, 5000, { softChars: 100 });
+  const options = compactionOptions(null, 100_000, { softChars: 100 });
   const first = compactMessages({ messages, ...options });
   assert.deepEqual(first.actions.map((action) => action.level), [1, 2, 3, 4]);
   const firstDropped = countDroppedTurns(first.messages);
