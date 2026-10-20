@@ -36,6 +36,13 @@ export async function runEvalCase({
   let agentResult = null;
   let checks = [];
   let error = null;
+  const budget = {
+    // 用例可以声明自己的预算：不同任务的参考解法成本差一个数量级，
+    // 用同一个上限去卡「读取 24 个模块」和「写一个文件」，失败只会反映任务大小。
+    maxTurns: testCase.maxTurns ?? maxTurns,
+    maxDurationMs: testCase.maxDurationMs ?? maxDurationMs,
+    maxContextChars,
+  };
 
   try {
     await testCase.setup({ workspaceRoot });
@@ -54,11 +61,9 @@ export async function runEvalCase({
       task: testCase.task,
       model,
       registry,
-      // 用例可以声明更紧或更宽的轮数预算：不同任务需要的轮数不同，
-      // 用全局上限去卡「读取 24 个模块」这类任务，只会把轮数变成噪音
-      maxTurns: testCase.maxTurns ?? maxTurns,
-      maxDurationMs,
-      maxContextChars,
+      maxTurns: budget.maxTurns,
+      maxDurationMs: budget.maxDurationMs,
+      maxContextChars: budget.maxContextChars,
       onEvent: (event) => onEvent?.({ caseId: testCase.id, ...event }),
     });
     checks = (await testCase.check({ workspaceRoot, agentResult }))
@@ -85,6 +90,7 @@ export async function runEvalCase({
     reason: agentResult?.reason ?? error,
     turns: agentResult?.turns ?? 0,
     durationMs: Date.now() - startedAt,
+    budget,
     checks,
     events: agentResult?.events ?? [],
     workspaceRoot: keepWorkspace ? workspaceRoot : null,

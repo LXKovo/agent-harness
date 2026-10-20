@@ -281,6 +281,7 @@ test('通读夹具迫使逐个读取，权重落在检索预览之外', async ()
   const sweep = evalCases.find((testCase) => testCase.id === 'sweep-audit-weights');
   assert.ok(sweep, '应注册 sweep-audit-weights');
   assert.equal(sweep.maxTurns, 16, '读取 24 个模块需要比默认 12 轮更宽的轮数预算');
+  assert.equal(sweep.maxDurationMs, 240_000, '这类探索任务的耗时安全网应高于全局 120 秒');
   const root = await mkdtemp(join(tmpdir(), 'agent-harness-fixture-sweep-'));
   try {
     await sweep.setup({ workspaceRoot: root });
@@ -327,6 +328,21 @@ test('测评失败由文件检查器决定，不采信模型的完成声明', as
   assert.equal(suite.passed, false);
   assert.equal(suite.results[0].status, 'completed');
   assert.equal(suite.results[0].checks[0].passed, false);
+});
+
+test('用例可以声明自己的预算，实际生效值会记录在结果里', async () => {
+  const model = createPassingFakeModel();
+  const custom = { ...evalCases[0], maxTurns: 5, maxDurationMs: 30_000 };
+  const suite = await runEvalSuite({ cases: [custom], model });
+  assert.deepEqual(suite.results[0].budget, {
+    maxTurns: 5, maxDurationMs: 30_000, maxContextChars: 120_000,
+  });
+
+  // 没声明预算的用例回落到全局默认，报告里同样能看出它是在什么上限下失败的
+  const plain = await runEvalSuite({ cases: [evalCases[0]], model });
+  assert.deepEqual(plain.results[0].budget, {
+    maxTurns: 12, maxDurationMs: 120_000, maxContextChars: 120_000,
+  });
 });
 
 test('可选择单个测评，保留工作区供人工检查', async () => {
