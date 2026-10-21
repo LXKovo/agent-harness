@@ -1,6 +1,6 @@
 # agent-harness
 
-一个用于学习和验证 coding agent 基础结构的 Node.js 项目。现在可以通过 OpenAI 兼容的 Chat Completions 接口运行**有轮数、耗时和上下文预算上限的单 Agent**：模型选择工具，程序校验并执行工具，再把结果按调用 ID 回传。上下文达到软阈值会先压缩历史，压缩后仍超硬预算才终止。运行仍限于可信、受控的任务目录。
+一个用于学习和验证 coding agent 基础结构的 Node.js 项目。现在可以通过 OpenAI 兼容的 Chat Completions 接口运行**有轮数、耗时和上下文预算上限的单 Agent**：模型选择工具，程序校验并执行工具，再把结果按调用 ID 回传。上下文达到软阈值会先压缩历史，压缩后仍超硬预算才终止。运行仍限于可信、受控的任务目录；默认不联网，网络工具需要显式开启。
 
 ## 运行一个任务
 
@@ -11,12 +11,15 @@ pnpm install
 node src/index.js --workspace ./scratch "在 result.txt 中写入 hello"
 ```
 
-先自行创建 `scratch`，并把任务文件放进去。CLI 要求显式指定工作区，且拒绝工作区根目录中的 `.env`。默认提供 `read_file`、`list_directory`、`search_files`、`apply_patch`、`write_file`；需要运行命令时有两个互斥的后端：
+先自行创建 `scratch`，并把任务文件放进去。CLI 要求显式指定工作区，且拒绝工作区根目录中的 `.env`。默认提供 `read_file`、`list_directory`、`search_files`、`apply_patch`、`write_file`；需要联网时加 `--web` 启用只读的 `web_fetch` / `web_search`；需要运行命令时有两个互斥的后端：
 
 ```bash
+node src/index.js --workspace ./scratch --web "搜索 DeepSeek 最新发布并总结"
 node src/index.js --workspace ./scratch --docker "运行该目录里的测试"      # 容器沙箱，推荐
 node src/index.js --workspace ./scratch --allow-shell "运行该目录里的测试" # 进程内直跑，仅限可信目录
 ```
+
+`--web` 在宿主机上发出 HTTP 请求：只允许 `http`/`https` 的 80/443 端口，拒绝 localhost、内网和保留地址，每次重定向都重新校验；默认 15 秒超时、最多 2MB、最终正文最多 8000 字符。`web_fetch` 把 HTML 压成可读文本，`web_search` 默认用 Bing 的 HTML 结果，设置 `TAVILY_API_KEY` 后可用 Tavily，也可显式选 DuckDuckGo。网页和搜索结果都标为不可信内容，可能包含提示注入。网络工具**不经过 Docker**：`--docker` 只隔离命令，`--web` 是宿主侧另一条出站通道；两者可以同时开启，但不要误以为容器无网络就等于整个 Agent 无网络。
 
 `--docker` 在一次性容器里执行命令：只挂载工作区、根文件系统只读、没有网络、命令结束即删除容器。拿不到 Docker 或镜像时程序直接退出，不会退化成无隔离执行。`--allow-shell` 是进程内直接执行，没有进程沙箱，能访问工作区外的资源，也可能读取磁盘上的凭据文件。详细边界见 [约束文档](docs/CONSTRAINTS.md)。
 
@@ -33,7 +36,7 @@ node src/index.js --resume demo
 
 会话默认保存在当前目录的 `.agent-harness/checkpoints.sqlite`，该目录已被 Git 忽略。若使用 `--checkpoint-db <路径>` 指定其他 SQLite 文件，首次运行和恢复时都要指定同一路径。数据库必须位于 Agent 工作区之外，因为它包含完整消息和工具结果。未指定 `--session` 时，原有一次性运行方式不变。
 
-每次工具调用前后都会保存 checkpoint；恢复会沿用原任务、工作区和 shell 权限。若上次在工具执行期间中断，程序不会自动重放该调用，而是把“结果未知”反馈给模型，供它先检查工作区。checkpoint 不回滚文件或命令的副作用。轮数上限跨恢复累计；达到上限后，可调高 `AGENT_MAX_TURNS` 再恢复。已完成的会话不能再次恢复。
+每次工具调用前后都会保存 checkpoint；恢复会沿用原任务、工作区、shell 与网络权限。恢复时不能新增 `--allow-shell` 或 `--web`，避免把受限会话升级成有出站网络或命令执行能力的会话。若上次在工具执行期间中断，程序不会自动重放该调用，而是把“结果未知”反馈给模型，供它先检查工作区。checkpoint 不回滚文件或命令的副作用。轮数上限跨恢复累计；达到上限后，可调高 `AGENT_MAX_TURNS` 再恢复。已完成的会话不能再次恢复。
 
 ## 情景记忆（首版）
 
@@ -81,12 +84,17 @@ L1 用工具声明的 compact 处理器截断长结果  →  L2 把上限收严 
 | `AGENT_DOCKER_CPUS` | `1` | 容器 CPU 上限 |
 | `AGENT_DOCKER_PIDS` | 256 | 容器进程数上限，防 fork 炸弹 |
 | `AGENT_DOCKER_USER` | `0:0` | 容器内运行用户；工作区需对该用户可写 |
+| `WEB_SEARCH_PROVIDER` | `auto` | `auto`/`tavily`/`bing`/`duckduckgo`；`auto` 有 Tavily key 时选 Tavily，否则选 Bing |
+| `TAVILY_API_KEY` | 空 | 可选的 Tavily 搜索密钥；不填也能用 Bing/DuckDuckGo |
+| `WEB_FETCH_TIMEOUT` | 15000 | 单次网页请求超时，毫秒；`WEB_SEARCH_TIMEOUT` 控制搜索 |
+| `WEB_FETCH_MAX_BYTES` | 2000000 | 单次响应读取上限，超出即截断 |
+| `WEB_FETCH_MAX_REDIRECTS` | 5 | 最多跟随的重定向次数 |
 
 ```bash
 pnpm test
 ```
 
-Windows PowerShell 若阻止 `pnpm.ps1`，可使用 `pnpm.cmd`。测试不使用真实 API Key：假模型验证多轮工具调用，本地 HTTP 服务验证 CLI 和兼容接口。沙箱的隔离断言（工作区可写、根只读、无网络、容器被删除）会在本机 Docker 与镜像可用时真实执行，否则跳过并说明原因。Windows 上的真实进程终止用例需要 `taskkill` 权限；若系统拒绝，工具会报告终止失败。
+Windows PowerShell 若阻止 `pnpm.ps1`，可使用 `pnpm.cmd`。测试不使用真实 API Key：假模型验证多轮工具调用，本地 HTTP 服务验证 CLI、兼容接口、`web_fetch` 和 `web_search` 的解析。网络测试只访问测试进程内的本地服务，不访问外网。沙箱的隔离断言（工作区可写、根只读、无网络、容器被删除）会在本机 Docker 与镜像可用时真实执行，否则跳过并说明原因。Windows 上的真实进程终止用例需要 `taskkill` 权限；若系统拒绝，工具会报告终止失败。
 
 ## 运行固定测评
 
@@ -101,7 +109,7 @@ pnpm run eval --case create-exact-file
 pnpm run eval --keep-workspaces            # 保留临时目录供人工检查
 ```
 
-当前有九个固定任务：精确创建文件、读取并转换已有文件、搜索并局部修改文件、修复代码并运行测试、在 75KB 级合成源码中定位并修改单个设置、跨多个文件检索唯一答案、**在含 60 个模块的仓库里定位唯一端点常量**、**在 24 个大型模块中比对配置权重**，以及**在容器沙箱里修复代码并验证网络隔离**。最后一项只有在 `--docker` 模式下可解，没有沙箱时会明确判失败。前四个有 12/12 的历史基线；第五至第八项用于制造真实的上下文压力与检索路径，让压缩和定向检索能被轨迹检验；其中第七项是判断是否需要子 Agent 的准入实验（见 [DESIGN.md](docs/DESIGN.md) D14），第八项要求逐个读取合计约 134KB 的模块，用例为它单独声明了轮数与耗时安全网。25 次真实运行里 15 次答对，10 次失败全部来自耗时或轮数预算而非上下文超限。输出会显示每项检查、模型轮数、耗时和总通过率，JSON 报告写入被 Git 忽略的 `eval-results/`。默认在测评结束后清理临时目录。真实基线见 [固定测评文档](docs/EVALUATION.md)。
+当前有九个固定任务：精确创建文件、读取并转换已有文件、搜索并局部修改文件、修复代码并运行测试、在 75KB 级合成源码中定位并修改单个设置、跨多个文件检索唯一答案、**在含 60 个模块的仓库里定位唯一端点常量**、**在 24 个大型模块中比对配置权重**，以及**在容器沙箱里修复代码并验证网络隔离**。最后一项只有在 `--docker` 模式下可解，没有沙箱时会明确判失败。前四个有 12/12 的历史基线；第五至第八项用于制造真实的上下文压力与检索路径，让压缩和定向检索能被轨迹检验；其中第七项是判断是否需要子 Agent 的准入实验（见 [DESIGN.md](docs/DESIGN.md) D14），第八项要求逐个读取合计约 134KB 的模块，用例为它单独声明了轮数与耗时安全网。旧夹具 25 次真实运行里 15 次答对；2026-10-21 加固后复测 10 次为 4/10，6 次失败仍是 16 轮耗尽，0 次上下文超限。输出会显示每项检查、模型轮数、耗时和总通过率，JSON 报告写入被 Git 忽略的 `eval-results/`。默认在测评结束后清理临时目录。真实基线见 [固定测评文档](docs/EVALUATION.md)。网络工具不参与固定测评。
 
 ## 当前工具与限制
 
@@ -113,5 +121,7 @@ pnpm run eval --keep-workspaces            # 保留临时目录供人工检查
 | `search_files` | 递归搜索字面量文本，返回文件和行列位置 | 跳过链接、二进制、大文件、`.git` 和 `node_modules`；限制文件数和结果长度 |
 | `apply_patch` | 对现有文本文件执行一组精确替换 | 默认要求旧文本唯一匹配；全部修改成功后才原子替换；限制文件与补丁大小 |
 | `write_file` | 写入 UTF-8 文本 | 默认拒绝覆盖，覆盖须显式指定；限制写入大小 |
+| `web_fetch` | 抓取公网 URL，HTML 转可读文本，JSON 保留原文 | 仅 http/https 的 80/443，拒绝 localhost/内网/保留地址；15 秒、2MB、8000 字符上限；不执行 JS、不带登录态；默认不注册，需 `--web` |
+| `web_search` | 搜索公开网页，返回标题、URL 和摘要 | 默认 Bing HTML（或 Tavily/DuckDuckGo）；依赖第三方页面结构，可能限流或改版；结果不可信；默认不注册，需 `--web` |
 
-M1 首版已经跑通：真实模型可完成文件任务和小型代码修复。最早四个固定任务连续 3 轮取得 12/12 通过；之后新增的上下文压力、跨文件检索、沙箱与大面积探索任务各有小样本真实运行。大面积探索的两项分别检验「检索定位」与「必须通读」：60 模块任务修复后 5/5 通过，24 模块任务累计 25 次运行答对 15 次。离线测试 108 项，2026-10-20 在干净工作区全绿（含两条真实 Docker 沙箱隔离断言），覆盖工具协议、恢复、记忆、四级压缩与两级应急截断、按用例预算、同轮并发与容器沙箱。后续改动应重复运行当前测评，观察成功率、轮数和失败模式是否退化。子 Agent 与规划器按 [DESIGN.md](docs/DESIGN.md) D14 暂缓，准入条件写在该节。目标见 [GOALS.md](docs/GOALS.md)，代码流程见 [TECHNICAL.md](docs/TECHNICAL.md)，设计取舍见 [DESIGN.md](docs/DESIGN.md)。
+M1 首版已经跑通：真实模型可完成文件任务和小型代码修复。最早四个固定任务连续 3 轮取得 12/12 通过；之后新增的上下文压力、跨文件检索、沙箱与大面积探索任务各有小样本真实运行。大面积探索的两项分别检验「检索定位」与「必须通读」：60 模块任务修复后 5/5 通过，24 模块任务旧夹具累计 25 次运行答对 15 次、加固后 10 次复测 4/10，失败仍集中在 16 轮预算。只读网络工具已作为默认关闭的能力扩展落地：Bing/DuckDuckGo/Tavily 解析有离线测试，`web_fetch` 走同一套 URL 安全校验，真实外网 smoke 已验证 `example.com` 与 Bing 搜索；它尚未纳入固定测评，也没有长期搜索页稳定性基线。离线测试 124 项，2026-10-21 在干净工作区全绿（含两条真实 Docker 沙箱隔离断言），覆盖工具协议、恢复、记忆、四级压缩与两级应急截断、按用例预算、同轮并发、容器沙箱与只读网络工具。后续改动应重复运行当前测评，观察成功率、轮数和失败模式是否退化。子 Agent 与规划器按 [DESIGN.md](docs/DESIGN.md) D14 暂缓，准入条件写在该节。目标见 [GOALS.md](docs/GOALS.md)，代码流程见 [TECHNICAL.md](docs/TECHNICAL.md)，设计取舍见 [DESIGN.md](docs/DESIGN.md)。

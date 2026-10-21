@@ -16,6 +16,7 @@ export function createCheckpointStore(filePath) {
       project_id TEXT,
       allow_shell INTEGER NOT NULL,
       sandbox INTEGER NOT NULL DEFAULT 0,
+      allow_web INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL,
       answer TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -49,6 +50,10 @@ export function createCheckpointStore(filePath) {
   if (!db.prepare('PRAGMA table_info(sessions)').all().some((column) => column.name === 'sandbox')) {
     db.exec('ALTER TABLE sessions ADD COLUMN sandbox INTEGER NOT NULL DEFAULT 0');
   }
+  // 网络工具权限同样是后加的：旧会话默认没有 --web
+  if (!db.prepare('PRAGMA table_info(sessions)').all().some((column) => column.name === 'allow_web')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN allow_web INTEGER NOT NULL DEFAULT 0');
+  }
 
   function transaction(fn) {
     db.exec('BEGIN IMMEDIATE');
@@ -73,11 +78,11 @@ export function createCheckpointStore(filePath) {
 
   return {
     path,
-    create({ id, workspace, task, allowShell, sandbox = false, projectId = null, state }) {
+    create({ id, workspace, task, allowShell, sandbox = false, allowWeb = false, projectId = null, state }) {
       const checkpointId = transaction(() => {
-        db.prepare(`INSERT INTO sessions (id, workspace, task, project_id, allow_shell, sandbox, status)
-          VALUES (?, ?, ?, ?, ?, ?, 'active')`).run(
-          id, workspace, task, projectId, Number(allowShell), Number(sandbox));
+        db.prepare(`INSERT INTO sessions (id, workspace, task, project_id, allow_shell, sandbox, allow_web, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`).run(
+          id, workspace, task, projectId, Number(allowShell), Number(sandbox), Number(allowWeb));
         return append(id, state);
       });
       latestIds.set(id, checkpointId);
@@ -92,7 +97,8 @@ export function createCheckpointStore(filePath) {
       return {
         id: session.id, workspace: session.workspace, task: session.task,
         projectId: session.project_id,
-        allowShell: Boolean(session.allow_shell), sandbox: Boolean(session.sandbox), status: session.status,
+        allowShell: Boolean(session.allow_shell), sandbox: Boolean(session.sandbox),
+        allowWeb: Boolean(session.allow_web), status: session.status,
         answer: session.answer,
         state: {
           phase: snapshot.phase, turnsUsed: snapshot.turns_used,

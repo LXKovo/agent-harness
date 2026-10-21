@@ -6,6 +6,8 @@ import { createListDirectoryTool } from './listDirectory.js';
 import { createSearchFilesTool } from './searchFiles.js';
 import { createApplyPatchTool } from './applyPatch.js';
 import { createWriteFileTool } from './writeFile.js';
+import { createWebFetchTool } from './webFetch.js';
+import { createWebSearchTool } from './webSearch.js';
 import { config } from '../config.js';
 
 /**
@@ -19,12 +21,20 @@ import { config } from '../config.js';
  *   - sandbox：一次性 Docker 容器（有隔离，需要 Docker 与镜像）
  * 具体提供哪一个由调用方决定；注册表不做隐式降级，避免「以为有隔离」。
  *
+ * 网络工具默认不注册，只有 includeWeb 为 true 时才加入。它们和命令工具
+ * 是两条独立边界：--docker 只隔离命令，不会替 web_fetch 提供网络隔离。
+ *
  * @param {object} [overrides] - 覆盖 config 中的字段（测试用）
- * @param {{includeExecCommand?: boolean, sandbox?: object}} [options]
- *   sandbox 存在时注册容器后端，此时 includeExecCommand 必须为 false
+ * @param {{includeExecCommand?: boolean, sandbox?: object, includeWeb?: boolean}} [options]
+ *   sandbox 存在时注册容器后端，此时 includeExecCommand 必须为 false；
+ *   includeWeb 决定是否注册只读的 web_fetch / web_search
  * @returns {ToolRegistry}
  */
-export function createToolRegistry(overrides = {}, { includeExecCommand = true, sandbox = null } = {}) {
+export function createToolRegistry(overrides = {}, {
+  includeExecCommand = true,
+  sandbox = null,
+  includeWeb = false,
+} = {}) {
   const settings = { ...config, ...overrides };
   const registry = new ToolRegistry();
 
@@ -62,6 +72,15 @@ export function createToolRegistry(overrides = {}, { includeExecCommand = true, 
   registry.register(createSearchFilesTool(settings), fileProcessors);
   registry.register(createApplyPatchTool(settings), fileProcessors);
   registry.register(createWriteFileTool(settings), fileProcessors);
+
+  if (includeWeb) {
+    const networkProcessors = {
+      summarize: (result) => result.split('\n')[0],
+      compact: (result) => result,
+    };
+    registry.register(createWebFetchTool(settings), networkProcessors);
+    registry.register(createWebSearchTool(settings), networkProcessors);
+  }
 
   return registry;
 }

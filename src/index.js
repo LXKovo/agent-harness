@@ -16,10 +16,12 @@ dotenv.config({ quiet: true });
 
 function usage() {
   return [
-    '用法: node src/index.js --workspace <目录> [--docker | --allow-shell] [--session <ID>] [--project <项目 ID>] "任务"',
+    '用法: node src/index.js --workspace <目录> [--docker | --allow-shell] [--web] [--session <ID>] [--project <项目 ID>] "任务"',
     '恢复: node src/index.js --resume <ID> [--checkpoint-db <SQLite 文件>]',
     '沙箱: --docker 在一次性容器内执行命令（只挂载工作区、根只读、无网络）；镜像由 AGENT_DOCKER_IMAGE 指定。',
     '      拿不到 Docker 或镜像时直接退出，不会退化成无隔离执行。',
+    '网络: --web 启用只读的 web_fetch / web_search；默认关闭。它们从宿主机访问公网，',
+    '      与 --docker 的命令沙箱是两条独立边界；网页和搜索结果都视为不可信输入。',
     '情景记忆: 新任务加 --project <项目 ID>，会自动创建会话并检索同项目的历史记录。',
     '会话默认保存在 .agent-harness/checkpoints.sqlite；首次运行和恢复须使用同一数据库。',
     '配置: MODEL_NAME、MODEL_API_KEY、可选 MODEL_BASE_URL（也接受 OPENAI_* 对应名称）',
@@ -53,6 +55,7 @@ function parseArgs(args) {
   let workspace;
   let allowShell = false;
   let sandbox = false;
+  let web = false;
   let sessionId;
   let resumeId;
   let checkpointDb;
@@ -68,6 +71,8 @@ function parseArgs(args) {
       allowShell = true;
     } else if (arg === '--docker' || arg === '--sandbox') {
       sandbox = true;
+    } else if (arg === '--web') {
+      web = true;
     } else if (arg === '--session' || arg === '--resume' || arg === '--checkpoint-db' || arg === '--project') {
       const value = args[++i];
       if (!value) throw new Error(`${arg} 需要参数`);
@@ -96,7 +101,7 @@ function parseArgs(args) {
   if (checkpointDb && !sessionId && !resumeId && !projectId) {
     throw new Error('--checkpoint-db 需要配合 --session、--resume 或 --project');
   }
-  return { workspace, allowShell, sandbox, sessionId, resumeId, checkpointDb, projectId,
+  return { workspace, allowShell, sandbox, web, sessionId, resumeId, checkpointDb, projectId,
     task: taskParts.join(' ') };
 }
 
@@ -106,7 +111,7 @@ async function main() {
     console.log(usage());
     return;
   }
-  const useSandbox = options.docker;
+  const useSandbox = options.sandbox;
   if (useSandbox) {
     // 沙箱说「有隔离」就必须真的有：拿不到 Docker 时直接退出，不做静默降级
     const report = await inspectDocker({ dockerBinary: config.dockerBinary, image: config.dockerImage });
@@ -135,6 +140,9 @@ async function main() {
     if (session && options.allowShell && !session.allowShell) {
       throw new Error('恢复时不能为原会话新增 --allow-shell 权限');
     }
+    if (session && options.web && !session.allowWeb) {
+      throw new Error('恢复时不能为原会话新增 --web 权限');
+    }
     if (session && options.projectId && options.projectId !== session.projectId) {
       throw new Error('恢复会话的项目 ID 与原会话不一致');
     }
@@ -156,6 +164,7 @@ async function main() {
     // 执行后端：恢复会话时沿用原会话的模式；沙箱比原模式更严，允许中途加上
     const sandbox = Boolean(session?.sandbox) || options.sandbox;
     const allowShell = sandbox ? false : (session?.allowShell ?? options.allowShell);
+    const allowWeb = Boolean(session?.allowWeb) || options.web;
     let memoryContext = '';
     if (store && !session && projectId) {
       const remembered = relevantEpisodes(store.recentEpisodes(projectId), task);
@@ -171,6 +180,7 @@ async function main() {
     });
     const registry = createToolRegistry({ workspaceRoot }, {
       includeExecCommand: allowShell,
+      includeWeb: allowWeb,
       sandbox: sandbox ? {
         image: config.dockerImage,
         memory: config.dockerMemory,
@@ -186,11 +196,17 @@ async function main() {
     const softContextRatio = unitRatio('AGENT_CONTEXT_SOFT_RATIO', DEFAULT_SOFT_CONTEXT_RATIO);
     const keepRecentTurns = positiveInt('AGENT_KEEP_RECENT_TURNS', DEFAULT_KEEP_RECENT_TURNS);
     if (store && !session) {
-      store.create({ id: sessionId, workspace: workspaceRoot, task, allowShell, sandbox, projectId,
+      store.create({ id: sessionId, workspace: workspaceRoot, task, allowShell, sandbox, allowWeb, projectId,
         state: initialState });
     }
     if (store) console.error(`会话 ${sessionId}；checkpoint: ${store.path}`);
     if (sandbox) console.error(`执行后端: Docker 沙箱（${config.dockerImage}）`);
+    if (allowWeb) {
+      console.error('网络工具: web_fetch / web_search（宿主侧只读；网页与搜索结果不可信）');
+      if (sandbox) {
+        console.error('注意: --web 不经过 Docker 沙箱，exec_command 仍在无网容器内');
+      }
+    }
     const controller = new AbortController();
     process.once('SIGINT', () => controller.abort());
     const result = await runAgent({

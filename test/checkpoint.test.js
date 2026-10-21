@@ -173,3 +173,19 @@ test('同轮并发执行时每条调用只执行一次，恢复不重放', async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('checkpoint 持久化并恢复网络工具权限', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-checkpoint-'));
+  const store = createCheckpointStore(join(root, 'sessions.sqlite'));
+  const state = createInitialAgentState('查一下');
+  try {
+    store.create({ id: 'web-on', workspace: root, task: '查一下', allowShell: false, allowWeb: true, state });
+    assert.equal(store.load('web-on').allowWeb, true);
+
+    store.create({ id: 'web-off', workspace: root, task: '只读文件', allowShell: false, state });
+    assert.equal(store.load('web-off').allowWeb, false, '未开启时默认没有网络权限');
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

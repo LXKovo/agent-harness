@@ -66,6 +66,21 @@ export const config = {
   maxSearchFileBytes: parseInt(process.env.MAX_SEARCH_FILE_BYTES) || 1_000_000,
 
   /**
+   * 网络工具（web_fetch / web_search）
+   *
+   * 默认不注册，只有 CLI 显式传 --web 才启用。网络访问是独立的能力边界：
+   * 它不写工作区，但能把 URL、查询词和模型构造的内容发到公网。
+   */
+  webFetchTimeoutMs: parseInt(process.env.WEB_FETCH_TIMEOUT) || 15_000,
+  webFetchMaxBytes: parseInt(process.env.WEB_FETCH_MAX_BYTES) || 2_000_000,
+  webFetchMaxRedirects: parseInt(process.env.WEB_FETCH_MAX_REDIRECTS) || 5,
+  webSearchTimeoutMs: parseInt(process.env.WEB_SEARCH_TIMEOUT) || 15_000,
+  webSearchMaxResults: parseInt(process.env.WEB_SEARCH_MAX_RESULTS) || 8,
+  webSearchProvider: process.env.WEB_SEARCH_PROVIDER || 'auto',
+  tavilyApiKey: process.env.TAVILY_API_KEY || '',
+  webUserAgent: process.env.WEB_USER_AGENT || 'agent-harness/0.1',
+
+  /**
    * 沙箱执行（Docker）
    *
    * 命令在一次性容器里跑：只挂载工作区、根文件系统只读、没有网络。

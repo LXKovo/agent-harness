@@ -19,13 +19,15 @@ src/
   model/openaiCompatible.js OpenAI 兼容 Chat Completions 客户端
   config.js                 工具配置
   safety/                   路径检查与通用等待超时
-  tools/                    注册表、两个命令后端及五个文件工具
+  tools/                    注册表、两个命令后端、五个文件工具与两个网络工具
+  tools/web/                网络工具的 URL 校验、内容提取与 HTTP 读取
 test/
   agent.test.js             假模型多轮任务、错误和停止条件
   context.test.js           上下文估算、四级压缩、保护窗口与降级路径
   toolBatch.test.js         同轮并发、同路径串行、取消与结果顺序
   cli.test.js               本地 HTTP 兼容接口的端到端测试
   eval.test.js              测评隔离、文件检查和失败判定
+  webTools.test.js          网络 URL 安全、抓取、搜索解析与注册边界
   其余测试                   工具、路径与超时
 ```
 
@@ -85,7 +87,7 @@ CLI → runAgent(task, model, registry, budgets)
 
 ## 5. 工具与权限
 
-`createToolRegistry(overrides, { includeExecCommand, sandbox })` 组装内置工具。命令工具有两个互斥后端，二者都叫 `exec_command`：默认不注册；`--allow-shell` 注册进程内后端；`--docker` 注册容器后端。两个都传时注册表直接抛错，不做隐式降级。`registry.invoke()` 继续返回模型可读字符串；`registry.invokeResult()` 返回 `{ status, content, truncated }`，可选 `code` 表示注册表层的具体错误。两者的可选第三个参数都可把 `AbortSignal` 传给工具。内置工具在输入不合要求或触及工作区边界时返回 `rejected`，I/O 与命令执行失败返回 `error`，结果不完整时返回 `truncated`；若命令同时失败和截断，`status` 为 `error`、`truncated` 为 `true`。自定义的纯文本工具仍受支持，但无法提供准确的失败状态，注册表将其视为 `success`。`getProcessor()` 提供 `compact` / `summarize`：`compact` 已用于上下文压缩的 L1/L2（见上），`summarize` 仍没有消费者。
+`createToolRegistry(overrides, { includeExecCommand, includeWeb, sandbox })` 组装内置工具。`includeWeb` 默认 `false`；只有 CLI 显式 `--web` 才注册 `web_fetch` / `web_search`。命令工具有两个互斥后端，二者都叫 `exec_command`：默认不注册；`--allow-shell` 注册进程内后端；`--docker` 注册容器后端。两个都传时注册表直接抛错，不做隐式降级。`registry.invoke()` 继续返回模型可读字符串；`registry.invokeResult()` 返回 `{ status, content, truncated }`，可选 `code` 表示注册表层的具体错误。两者的可选第三个参数都可把 `AbortSignal` 传给工具。内置工具在输入不合要求或触及工作区边界时返回 `rejected`，I/O 与命令执行失败返回 `error`，结果不完整时返回 `truncated`；若命令同时失败和截断，`status` 为 `error`、`truncated` 为 `true`。自定义的纯文本工具仍受支持，但无法提供准确的失败状态，注册表将其视为 `success`。`getProcessor()` 提供 `compact` / `summarize`：`compact` 已用于上下文压缩的 L1/L2（见上），`summarize` 仍没有消费者。
 
 | 工具 | 当前行为 | 关键边界 |
 |---|---|---|
@@ -96,6 +98,8 @@ CLI → runAgent(task, model, registry, budgets)
 | `search_files` | 递归进行单行字面量搜索，返回文件与行列位置 | 跳过链接、二进制、大文件、`.git` 和 `node_modules`；限制扫描文件数、匹配数和输出长度 |
 | `apply_patch` | 按顺序执行一个或多个精确文本替换 | 默认要求唯一匹配，只修改已有 UTF-8 文件；全部校验完成后原子替换 |
 | `write_file` | 默认只新建；覆盖时先写同目录临时文件再替换 | 不建父目录，不提供并发冲突检测 |
+| `web_fetch` | GET 一个公网 URL；HTML 转文本，JSON 保留原文；跟随有限重定向 | 仅 http/https 的 80/443；拒绝 localhost/内网/保留地址；默认不注册，需 `--web`；不执行 JS、不带 Cookie/登录态 |
+| `web_search` | 查询搜索服务，返回标题、URL、摘要；去重并限制条数 | 默认 Bing HTML，可选 Tavily/DuckDuckGo；依赖第三方页面结构；结果不可信；默认不注册，需 `--web` |
 
 命令子进程会过滤名称符合常见 `API_KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`CREDENTIAL` 模式的环境变量。这**不是凭据隔离**：命令仍能读工作区外文件，也可能读 `.env` 等磁盘凭据。CLI 要求显式指定任务目录并拒绝其根目录中的 `.env`，但不能证明整个目录树没有秘密文件；只在可信的一次性目录开启 shell。文件工具的真实路径检查也存在检查与使用之间的竞态。详见 [CONSTRAINTS.md](./CONSTRAINTS.md)。
 
@@ -121,6 +125,16 @@ CLI → runAgent(task, model, registry, budgets)
 
 `inspectDocker()` 在启动前检查 Docker 与镜像。CLI 与测评在这一步失败时直接退出或抛错，**不做静默降级**：宁可拒绝执行，也不让「以为有隔离」发生。真实隔离断言（工作区可写、根只读、无网络、超时后无残留容器）在 `test/dockerCommand.test.js` 中，只有本机 Docker 与镜像可用时才真实执行，否则跳过并打印原因。
 
+### 只读网络工具（`--web`）
+
+CLI 默认不注册网络工具；`--web` 才把 `web_fetch` / `web_search` 加入注册表，并把 `allow_web` 记入会话。恢复会话沿用该权限，不能在恢复时新增 `--web`。网络请求发生在宿主机进程内，**不经过 Docker**：`--docker` 的「无网络」只约束容器里的命令，不约束这两个工具。
+
+`web_fetch` 只接受 `http`/`https`、80/443 端口、不带 userinfo 的 URL。`src/tools/web/urlSafety.js` 除检查主机名黑名单外，还会解析域名的全部地址，拒绝 loopback、链路本地、私网、ULA 等保留地址；手动跟随重定向（默认最多 5 次），每一跳都重新做同样检查。请求默认 15 秒超时；响应最多读取 2MB；只接受 `text/*`、JSON、XML 等文本类型，二进制直接拒绝。HTML 会被压成可读文本并保留绝对链接目标，JSON 保留原文；最终正文默认最多 8000 字符，超出标为 `truncated`。调用方的 `AbortSignal` 会取消请求。
+
+`web_search` 默认 `WEB_SEARCH_PROVIDER=auto`：有 `TAVILY_API_KEY` 时用 Tavily JSON API，否则用 Bing 的 HTML 结果页；也可显式选 `bing`、`duckduckgo` 或 `tavily`。Bing 结果会解码 `bing.com/ck/a` 跳转，DuckDuckGo 会解码 `uddg` 跳转；两者都跳过广告项、按 URL 去重、标题截到 300 字符、摘要截到 500 字符。默认最多 8 条（工具参数可到 10），默认 15 秒超时，最终输出受 8000 字符上限约束。搜索没有稳定 API，选择器失效时返回「没有结果」而不是整页 HTML；第三方页面限流、验证码或改版都会让搜索失败，错误会作为工具结果回传，不抛出 Agent 循环。
+
+两者都把网页或搜索摘要标为「外部内容，不可信」，但**标记不等于隔离**：网页文本仍可能包含针对模型的提示注入，模型仍可能把 URL 或查询词发到公网。URL 检查与实际连接之间还存在 DNS 重绑定的时间窗；不执行 JavaScript、不维持 Cookie/登录态，也不下载文件。详细边界见 [CONSTRAINTS.md](./CONSTRAINTS.md)。
+
 ## 6. 配置与运行
 
 需要 Node.js 22.13+、pnpm 11.10+。CLI 从当前目录加载 `.env`，也可直接使用进程环境变量。
@@ -128,6 +142,7 @@ CLI → runAgent(task, model, registry, budgets)
 ```bash
 pnpm install
 node src/index.js --workspace ./scratch "在 result.txt 写入 hello"
+node src/index.js --workspace ./scratch --web "搜索 DeepSeek 最新发布并总结"
 node src/index.js --workspace ./scratch --docker "运行该目录里的测试"
 node src/index.js --workspace ./scratch --allow-shell "运行该目录里的测试"
 pnpm test
@@ -139,11 +154,11 @@ CLI 可通过 `--session <ID>` 开始持久化会话，以 `--resume <ID>` 从 S
 
 指定 `--project <ID>` 时，CLI 自动建立会话（也可显式指定 `--session`），在完成时将截短的任务、最终答复及工具名称写入 `memory_episodes`。会话完成状态与记忆记录在同一 SQLite 事务中写入。新任务只从同项目最近 200 条记录中做文字相关性排序，选最多三条，并限制注入长度；记录作为当前任务之前的用户参考消息提供给模型。历史答复未经过独立验收，提示中明确要求先核实；当前没有长期知识提炼、向量索引或中文分词服务。
 
-`AGENT_MAX_TURNS`、`AGENT_MAX_DURATION_MS`、`AGENT_MAX_CONTEXT_CHARS`、`AGENT_KEEP_RECENT_TURNS`、`AGENT_DOCKER_PIDS` 为 CLI 的严格正整数配置，`AGENT_CONTEXT_SOFT_RATIO` 必须是 (0, 1] 之间的数值，`AGENT_MODEL_MAX_RETRIES` 必须是 0 到 5 之间的整数；沙箱另有 `AGENT_DOCKER_IMAGE`、`AGENT_DOCKER_MEMORY`、`AGENT_DOCKER_CPUS`、`AGENT_DOCKER_USER`、`AGENT_DOCKER_BINARY`。工具层仍使用 `WORKSPACE_ROOT`、`SHELL_PATH`、`COMMAND_TIMEOUT`、`MAX_COMMAND_TIMEOUT`、`MAX_OUTPUT_CHARS`、`MAX_WRITE_CHARS`、`MAX_SEARCH_FILES`、`MAX_SEARCH_FILE_BYTES`；其中工具配置的环境变量解析仍采用 `parseInt(value) || default`，尚未统一验证。命令输出上限分别作用于 stdout 和 stderr，不是完整工具结果的硬上限。
+`AGENT_MAX_TURNS`、`AGENT_MAX_DURATION_MS`、`AGENT_MAX_CONTEXT_CHARS`、`AGENT_KEEP_RECENT_TURNS`、`AGENT_DOCKER_PIDS` 为 CLI 的严格正整数配置，`AGENT_CONTEXT_SOFT_RATIO` 必须是 (0, 1] 之间的数值，`AGENT_MODEL_MAX_RETRIES` 必须是 0 到 5 之间的整数；沙箱另有 `AGENT_DOCKER_IMAGE`、`AGENT_DOCKER_MEMORY`、`AGENT_DOCKER_CPUS`、`AGENT_DOCKER_USER`、`AGENT_DOCKER_BINARY`。网络工具有 `WEB_SEARCH_PROVIDER`（`auto`/`tavily`/`bing`/`duckduckgo`）、`TAVILY_API_KEY`、`WEB_FETCH_TIMEOUT`、`WEB_FETCH_MAX_BYTES`、`WEB_FETCH_MAX_REDIRECTS`、`WEB_SEARCH_TIMEOUT`、`WEB_SEARCH_MAX_RESULTS`、`WEB_USER_AGENT`。工具层仍使用 `WORKSPACE_ROOT`、`SHELL_PATH`、`COMMAND_TIMEOUT`、`MAX_COMMAND_TIMEOUT`、`MAX_OUTPUT_CHARS`、`MAX_WRITE_CHARS`、`MAX_SEARCH_FILES`、`MAX_SEARCH_FILE_BYTES`；其中工具配置的环境变量解析仍采用 `parseInt(value) || default`，尚未统一验证。命令输出上限分别作用于 stdout 和 stderr，不是完整工具结果的硬上限。
 
-离线测试包含假模型任务与本地 HTTP 服务端到端流程，不需外网和真实密钥。Windows 真正的进程终止测试依赖系统允许 `taskkill`；拒绝时会报告终止失败。`withTimeout()` 仍只停止等待 Promise，不会取消底层操作；模型请求采用 SDK 的 `AbortSignal`。
+离线测试包含假模型任务、本地 HTTP 服务端到端流程，以及网络工具的本地服务器/HTML 夹具；不需外网和真实密钥。Windows 真正的进程终止测试依赖系统允许 `taskkill`；拒绝时会报告终止失败。`withTimeout()` 仍只停止等待 Promise，不会取消底层操作；模型请求采用 SDK 的 `AbortSignal`。
 
-`pnpm run eval` 使用真实模型，当前顺序运行七个文件任务、一个代码修复任务和一个需要 `--docker` 的沙箱任务（共九项）。每项测评用 `mkdtemp` 创建独立工作区；文件任务只注册文件工具，代码任务在进程内后端下显式注册 `exec_command`，加 `--docker` 后所有命令一律进容器。检查器验证精确文件内容、目录集合、受保护夹具未修改、搜索和补丁工具调用、命令调用，并独立执行 `node --test`。模型返回 `completed` 只是必要条件，检查失败仍判为失败。声明 `requiresSandbox` 的任务在没有沙箱时直接判失败，不会静默跳过。用例可以声明 `maxTurns` 与 `maxDurationMs` 覆盖默认预算，实际生效值记录在每条结果（JSON 报告的 `budget` 字段）里。预算从参考解法成本推导，而不是调到通过为止：`sweep-audit-weights` 的参考解法是逐个读取 24 个文件（本机 50–95 秒、8–12 轮），所以轮数放到 16、耗时安全网放到 240 秒（约 ×3），只用来兜慢请求，不用来判效率 —— 效率仍看轮数、工具调用和耗时本身。
+`pnpm run eval` 使用真实模型，当前顺序运行七个文件任务、一个代码修复任务和一个需要 `--docker` 的沙箱任务（共九项）。每项测评用 `mkdtemp` 创建独立工作区；文件任务只注册文件工具，不注册网络工具；代码任务在进程内后端下显式注册 `exec_command`，加 `--docker` 后所有命令一律进容器。检查器验证精确文件内容、目录集合、受保护夹具未修改、搜索和补丁工具调用、命令调用，并独立执行 `node --test`。模型返回 `completed` 只是必要条件，检查失败仍判为失败。声明 `requiresSandbox` 的任务在没有沙箱时直接判失败，不会静默跳过。用例可以声明 `maxTurns` 与 `maxDurationMs` 覆盖默认预算，实际生效值记录在每条结果（JSON 报告的 `budget` 字段）里。预算从参考解法成本推导，而不是调到通过为止：`sweep-audit-weights` 的参考解法是逐个读取 24 个文件（本机 50–95 秒、8–12 轮），所以轮数放到 16、耗时安全网放到 240 秒（约 ×3），只用来兜慢请求，不用来判效率 —— 效率仍看轮数、工具调用和耗时本身。
 
 `--repeat` 最多允许 20 轮。每次命令把汇总、逐项检查和不含工具参数的事件写入 `eval-results/<timestamp>.json`；该目录不入库。默认清理工作区，`--keep-workspaces` 会保留并打印路径。首个真实基线和异常记录见 [EVALUATION.md](./EVALUATION.md)。
 
