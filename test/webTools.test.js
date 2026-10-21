@@ -51,6 +51,16 @@ before(async () => {
       res.end('x'.repeat(10_000));
       return;
     }
+    if (url.pathname === '/text') {
+      res.setHeader('content-type', 'text/plain; charset=utf-8');
+      res.end('0123456789');
+      return;
+    }
+    if (url.pathname === '/emoji') {
+      res.setHeader('content-type', 'text/plain; charset=utf-8');
+      res.end('a😀b');
+      return;
+    }
     if (url.pathname === '/slow') {
       setTimeout(() => {
         res.setHeader('content-type', 'text/plain');
@@ -192,6 +202,44 @@ describe('web_fetch', () => {
     assert.equal(result.status, 'error');
     assert.match(result.content, /fetch failed/);
     assert.match(result.content, /ECONNREFUSED/);
+  });
+
+  test('按 offset 和 maxChars 读取长正文的指定区间', async () => {
+    const first = await fetchTool({ maxOutputChars: 6 }).invokeResult({
+      url: `${origin}/text`,
+      offset: 3,
+      maxChars: 4,
+    });
+    assert.equal(first.status, 'truncated');
+    assert.match(first.content, /3456/);
+    assert.match(first.content, /读取: 偏移 3–7 \/ 共 10 字符/);
+    assert.match(first.content, /offset=7 继续/);
+
+    const second = await fetchTool({ maxOutputChars: 6 }).invokeResult({
+      url: `${origin}/text`,
+      offset: 6,
+      maxChars: 4,
+    });
+    assert.equal(second.status, 'success');
+    assert.match(second.content, /6789/);
+    assert.doesNotMatch(second.content, /内容已截断|响应达到/);
+  });
+
+  test('offset 超出正文长度时明确拒绝', async () => {
+    const result = await fetchTool().invokeResult({ url: `${origin}/text`, offset: 11 });
+    assert.equal(result.status, 'rejected');
+    assert.match(result.content, /offset 11 超出已读取正文长度 10 字符/);
+  });
+
+  test('偏移落在代理对中间时回退到字符起点，不返回半个 emoji', async () => {
+    const result = await fetchTool().invokeResult({
+      url: `${origin}/emoji`,
+      offset: 2,
+      maxChars: 3,
+    });
+    assert.equal(result.status, 'success');
+    assert.match(result.content, /😀b/);
+    assert.match(result.content, /读取: 偏移 1–4 \/ 共 4 字符/);
   });
 
   test('超时和取消都以工具结果返回，不抛到 Agent 循环', async () => {
@@ -364,6 +412,8 @@ describe('注册与参数', () => {
       includeWeb: true,
     });
     assert.match(await registry.invoke('web_fetch', {}), /参数不合法/);
+    assert.match(await registry.invoke('web_fetch', { url: 'http://example.com/', maxChars: 99_999 }), /参数不合法/);
+    assert.match(await registry.invoke('web_fetch', { url: 'http://example.com/', offset: -1 }), /参数不合法/);
     assert.match(await registry.invoke('web_search', {}), /参数不合法/);
   });
 });

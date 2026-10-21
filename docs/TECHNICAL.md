@@ -129,7 +129,7 @@ CLI → runAgent(task, model, registry, budgets)
 
 CLI 默认不注册网络工具；`--web` 才把 `web_fetch` / `web_search` 加入注册表，并把 `allow_web` 记入会话。恢复会话沿用该权限，不能在恢复时新增 `--web`。网络请求发生在宿主机进程内，**不经过 Docker**：`--docker` 的「无网络」只约束容器里的命令，不约束这两个工具。
 
-`web_fetch` 只接受 `http`/`https`、80/443 端口、不带 userinfo 的 URL。`src/tools/web/urlSafety.js` 除检查主机名黑名单外，还会解析域名的全部地址，拒绝 loopback、链路本地、私网、ULA 等保留地址；手动跟随重定向（默认最多 5 次），每一跳都重新做同样检查。请求默认 15 秒超时；响应最多读取 2MB；只接受 `text/*`、JSON、XML 等文本类型，二进制直接拒绝。HTML 会被压成可读文本并保留绝对链接目标，JSON 保留原文；最终正文默认最多 8000 字符，超出标为 `truncated`。调用方的 `AbortSignal` 会取消请求。
+`web_fetch` 只接受 `http`/`https`、80/443 端口、不带 userinfo 的 URL。`src/tools/web/urlSafety.js` 除检查主机名黑名单外，还会解析域名的全部地址，拒绝 loopback、链路本地、私网、ULA 等保留地址；手动跟随重定向（默认最多 5 次），每一跳都重新做同样检查。请求默认 15 秒超时；响应最多读取 2MB；只接受 `text/*`、JSON、XML 等文本类型，二进制直接拒绝。HTML 会被压成可读文本并保留绝对链接目标，JSON 保留原文；最终正文默认最多 8000 字符，超出标为 `truncated`。长页面可用 `offset` / `maxChars` 分段读取：偏移按 0 开始，结果会给出下一段的 `offset`；偏移落在代理对中间时回退到该字符起点；`offset` 超出已读取正文长度时明确拒绝。调用方的 `AbortSignal` 会取消请求。
 
 `web_search` 默认 `WEB_SEARCH_PROVIDER=auto`：有 `TAVILY_API_KEY` 时用 Tavily JSON API，否则用 Bing 的 HTML 结果页；也可显式选 `bing`、`duckduckgo` 或 `tavily`。Bing 结果会解码 `bing.com/ck/a` 跳转，DuckDuckGo 会解码 `uddg` 跳转；两者都跳过广告项、按 URL 去重、标题截到 300 字符、摘要截到 500 字符。默认最多 8 条（工具参数可到 10），默认 15 秒超时，最终输出受 8000 字符上限约束。搜索没有稳定 API，选择器失效时返回「没有结果」而不是整页 HTML；第三方页面限流、验证码或改版都会让搜索失败，错误会作为工具结果回传，不抛出 Agent 循环。
 
