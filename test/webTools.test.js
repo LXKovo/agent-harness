@@ -183,6 +183,17 @@ describe('web_fetch', () => {
     assert.match((await fetchTool().invokeResult({ url: `${origin}/error` })).content, /HTTP 500/);
   });
 
+  test('网络失败保留底层原因，便于模型区分重试与放弃', async () => {
+    const failure = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    });
+    const result = await fetchTool({ fetchImpl: async () => { throw failure; } })
+      .invokeResult({ url: `${origin}/html` });
+    assert.equal(result.status, 'error');
+    assert.match(result.content, /fetch failed/);
+    assert.match(result.content, /ECONNREFUSED/);
+  });
+
   test('超时和取消都以工具结果返回，不抛到 Agent 循环', async () => {
     const timedOut = await fetchTool({ webFetchTimeoutMs: 20 }).invokeResult({ url: `${origin}/slow` });
     assert.equal(timedOut.status, 'error');

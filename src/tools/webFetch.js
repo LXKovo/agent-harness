@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { toolError, toolResult, withToolResult } from './result.js';
 import { assertPublicUrl } from './web/urlSafety.js';
 import {
-  contentTypeOf, decodeText, isAllowedContentType, isHtmlContentType, readBody,
+  contentTypeOf, decodeText, describeFetchError, isAllowedContentType, isHtmlContentType, readBody,
 } from './web/http.js';
 import { extractTitle, htmlToText } from './web/content.js';
 
@@ -144,7 +144,7 @@ export function createWebFetchTool({
         if (timedOut) {
           return toolResult('error', `网页抓取超时（${webFetchTimeoutMs} ms）`);
         }
-        return toolError(`网页抓取失败: ${url} — ${err?.message ?? err}`, err);
+        return toolError(`网页抓取失败: ${url} — ${describeFetchError(err)}`, err);
       } finally {
         clearTimeout(timer);
         callerSignal?.removeEventListener('abort', abortFromCaller);

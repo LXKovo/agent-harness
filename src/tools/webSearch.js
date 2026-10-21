@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { toolError, toolResult, withToolResult } from './result.js';
-import { readBody, decodeText } from './web/http.js';
+import { readBody, decodeText, describeFetchError } from './web/http.js';
 import { compactText, decodeEntities, stripTags } from './web/content.js';
 
 function findAnchor(html, marker) {
@@ -340,7 +340,7 @@ export function createWebSearchTool({
       } catch (err) {
         if (callerSignal?.aborted) return toolResult('rejected', '网页搜索已取消');
         if (timedOut) return toolResult('error', `网页搜索超时（${webSearchTimeoutMs} ms）`);
-        return toolError(`网页搜索失败: ${err?.message ?? err}`, err);
+        return toolError(`网页搜索失败: ${describeFetchError(err)}`, err);
       } finally {
         clearTimeout(timer);
         callerSignal?.removeEventListener('abort', abortFromCaller);

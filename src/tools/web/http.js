@@ -76,3 +76,20 @@ export function decodeText(buffer, contentType) {
     return new TextDecoder('utf-8').decode(buffer);
   }
 }
+
+/**
+ * 把 fetch 的「fetch failed」补上底层原因（ENOTFOUND、ECONNRESET 等）。
+ *
+ * Node 的 fetch 只把 cause 藏在 error.cause 里；只回传顶层消息会让模型
+ * 无法区分「域名不存在」「连接被重置」和「证书问题」，只能盲目重试。
+ */
+export function describeFetchError(error) {
+  const message = String(error?.message ?? error ?? '未知错误').slice(0, 300);
+  const cause = error?.cause;
+  const code = typeof cause?.code === 'string' ? cause.code : (typeof error?.code === 'string' ? error.code : '');
+  const causeMessage = typeof cause?.message === 'string' && cause.message !== message
+    ? cause.message.slice(0, 300)
+    : '';
+  const detail = [code, causeMessage].filter(Boolean).join(': ');
+  return detail ? `${message}（${detail}）` : message;
+}
