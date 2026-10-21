@@ -47,7 +47,9 @@ function sweepState(task, toolMessages) {
   // 只解析本轮新增的结果：旧结果可能已被上下文压缩截断，这正是要模拟的行为
   for (const message of toolMessages.slice(state.seen)) {
     const filePath = message.content.match(/^文件: (.+)$/m)?.[1];
-    const weight = Number(message.content.match(/"weight":(\d+)/)?.[1]);
+    const auditLine = message.content.split('\n').find((line) => line.startsWith('// audit: '));
+    const weightText = auditLine?.slice(-8) ?? '';
+    const weight = /^\d{8}$/.test(weightText) ? Number(weightText) : NaN;
     if (filePath && Number.isFinite(weight) && (!state.best || weight > state.best.weight)) {
       state.best = { filePath, weight };
     }
@@ -295,19 +297,29 @@ test('通读夹具迫使逐个读取，权重落在检索预览之外', async ()
     for (const path of files) {
       const content = await readFile(join(root, path), 'utf8');
       totalChars += content.length;
-      const hits = content.split('"weight":').length - 1;
-      assert.ok(hits <= 1, `${path} 中出现 ${hits} 次 weight`);
-      if (hits === 0) continue;
-      const auditLine = content.split('\n').find((line) => line.startsWith('// audit: '));
-      assert.ok(auditLine, `${path} 缺少审计行`);
-      assert.equal(content.split('\n')[0], auditLine, `${path} 的审计行必须是第一行`);
-      // search_files 的预览只回显每行前 300 字符；审计行必须超过 300 字符，
-      // 且 weight 位于 300 之后，否则一次搜索就能拿到全部权重，夹具失去意义
-      assert.ok(auditLine.length > 300, `${path} 审计行只有 ${auditLine.length} 字符`);
-      assert.ok(auditLine.indexOf('"weight":') > 300, `${path} 的 weight 落在检索预览范围内`);
+      if (path === 'README.md') continue;
+      // 去掉可检索的 `"weight":` 键，命中/未命中不能再用来逐位试探
+      assert.ok(!content.includes('"weight":'), `${path} 不应包含可检索的 "weight": 键`);
+      const lines = content.split('\n');
+      const audits = lines.filter((line) => line.startsWith('// audit: '));
+      assert.equal(audits.length, 1, `${path} 应只有一条审计行`);
+      const [auditLine] = audits;
+      assert.equal(lines[0], auditLine, `${path} 的审计行必须是第一行`);
+      // search_files 的预览只回显每行前 300 字符；weight 是整行最后 8 个字符，
+      // 必须完全落在 300 之后，否则一次搜索就能拿到权重，夹具失去意义
+      const weightText = auditLine.slice(-8);
+      assert.match(weightText, /^\d{8}$/, `${path} 的审计行末尾不是 8 位十进制 weight`);
+      const weightStart = auditLine.length - 8;
+      assert.ok(weightStart > 300, `${path} 的 weight 落在检索预览范围内`);
       // 同时要落在 L1 压缩保留的前 1200 字符内，否则失败可能来自压缩截断而不是读取策略
-      assert.ok(content.indexOf('"weight":') < 1200, `${path} 的 weight 位于 L1 截断之后`);
-      weights.set(path, Number(content.match(/"weight":(\d+)/)[1]));
+      assert.ok(weightStart < 1200, `${path} 的 weight 位于 L1 截断之后`);
+      assert.ok(auditLine.length < 400, `${path} 审计行有 ${auditLine.length} 字符`);
+      // 封条长度逐模块变化，让「按列号定位某一位」也不再可行
+      const packed = auditLine.slice('// audit: '.length).split(' ')[1];
+      const seal = packed.slice(0, -8);
+      assert.match(seal, /^[0-9a-f]{300,360}$/, `${path} 的封条形状不符合预期`);
+      assert.match(seal.at(-1), /[a-f]/, `${path} 的封条最后一位应为字母`);
+      weights.set(path, Number(weightText));
     }
     assert.equal(weights.size, 24, '每个模块都应有一条带 weight 的审计行');
     // 逐个读取全部模块必然越过 120000 字符的默认硬预算，读取过程会触发压缩
