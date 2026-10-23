@@ -148,6 +148,7 @@ test('L1 先用工具自己的 compact 处理器，再按上限兜底截断', ()
   assert.ok(outsideWindow.every((content) => content.includes('已截断到 200 字符')),
     '标记必须写实际生效的上限，不能沿用处理器的返回长度');
   assert.equal(contents.at(-1).length, 5000, '保护窗口内刚读到的结果不能被截断');
+  assert.deepEqual(result.omittedCallIds, [], 'L1/L2 只是截断，工具结果并未整条省略');
 });
 
 test('处理器已经压到上限以内时不再加截断标记', () => {
@@ -187,6 +188,8 @@ test('L3 只把保护窗口之前的工具结果换成引用', () => {
     Array.from({ length: 19 }, (_, index) => `c${index}`));
   assert.equal(toolIds(result.messages).length, 20, '被换成引用的工具结果仍留在原位');
   assert.equal(result.messages.at(-1).content.length, 3000, '最近一轮的工具结果必须原样保留');
+  assert.deepEqual(result.omittedCallIds, references.map((message) => message.tool_call_id),
+    '换成引用的工具调用必须全部报为已省略');
   assertToolPairingIntact(result.messages);
 });
 
@@ -438,6 +441,79 @@ test('压缩后仍超硬预算时终止为 context_limit，并说明原因', asy
   assert.equal(result.status, 'context_limit');
   assert.match(result.reason, /字符预算/);
   assert.ok(result.events.some((event) => event.type === 'stop' && event.status === 'context_limit'));
+});
+
+test('压缩省略文件后，模型重读同一文件会被记录', async () => {
+  const payload = 'x'.repeat(6000);
+  for (const name of ['a.txt', 'b.txt', 'c.txt']) {
+    await writeFile(join(workspace, name), payload, 'utf8');
+  }
+  const registry = createToolRegistry({ workspaceRoot: workspace }, { includeExecCommand: false });
+  let index = 0;
+  const model = {
+    async complete({ messages }) {
+      const step = index++;
+      if (step === 0) return response([call('read-a', 'read_file', { filePath: 'a.txt' })]);
+      if (step === 1) return response([call('read-b', 'read_file', { filePath: 'b.txt' })]);
+      if (step === 2) return response([call('read-c', 'read_file', { filePath: 'c.txt' })]);
+      if (step === 3) {
+        // 第四轮开始时 a 已在保护窗口之外：可能被换成引用（L3），也可能整组被丢弃（L4）。
+        // 两种情况都算「a 的读取结果已不在上下文里」，后续重读应能被识别。
+        assert.ok(messages.some((message) => message.role === 'tool'
+          && typeof message.content === 'string' && message.content.startsWith(REFERENCE))
+        || messages.some((message) => typeof message.content === 'string'
+          && message.content.startsWith(DROPPED)),
+        'a.txt 的读取结果应已被压缩省略');
+        // 故意用 ./ 前缀重读，验证路径归一化
+        return response([call('reread-a', 'read_file', { filePath: './a.txt' })]);
+      }
+      return response([], '完成');
+    },
+  };
+  const result = await runAgent({
+    task: '依次读取三个文件并复查', model, registry, maxTurns: 6,
+    maxContextChars: 20_000, softContextRatio: 0.4, keepRecentTurns: 2,
+  });
+  assert.equal(result.status, 'completed');
+  const contextEvents = result.events.filter((event) => event.type === 'context'
+    && event.action === 'compacted');
+  assert.ok(contextEvents.length >= 1, '本用例必须真的触发压缩');
+  assert.ok(contextEvents.some((event) => event.omittedFiles.includes('a.txt')),
+    '压缩事件应报告被省略的文件路径');
+  const reread = result.events.filter((event) => event.type === 'reread');
+  assert.deepEqual(reread.map((event) => [event.path, event.first]), [['a.txt', true]]);
+  assert.deepEqual(result.compression.omittedPaths, ['a.txt', 'b.txt']);
+  assert.deepEqual(result.compression.rereadPaths, ['a.txt']);
+  assert.equal(result.compression.omittedResults, 2);
+  assert.equal(result.compression.rereadCalls, 1);
+  assert.equal(result.compression.rereadRate, 0.5);
+  // stop 事件里带同一份汇总，报告不必再从事件流里反推
+  const stop = result.events.find((event) => event.type === 'stop');
+  assert.deepEqual(stop.compression, result.compression);
+});
+
+test('压缩统计随 checkpoint 恢复，重读仍能被识别', async () => {
+  await writeFile(join(workspace, 'a.txt'), 'content', 'utf8');
+  const registry = createToolRegistry({ workspaceRoot: workspace }, { includeExecCommand: false });
+  const task = '继续检查已压缩过的文件';
+  const state = createInitialAgentState(task);
+  state.compression = { omittedPaths: ['a.txt'], rereadPaths: [], omittedResults: 1, rereadCalls: 0 };
+  state.messages.push({ role: 'assistant', content: null,
+    tool_calls: [call('old-read', 'read_file', { filePath: 'a.txt' })] });
+  state.messages.push({ role: 'tool', tool_call_id: 'old-read', name: 'read_file',
+    content: `${REFERENCE}，调用参数见上一条 assistant 消息]` });
+  let index = 0;
+  const result = await runAgent({
+    task, initialState: state, registry, maxTurns: 4,
+    model: { async complete() {
+      if (index++ === 0) return response([call('new-read', 'read_file', { filePath: 'a.txt' })]);
+      return response([], '已重新读取');
+    } },
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.compression.omittedPaths, ['a.txt']);
+  assert.deepEqual(result.compression.rereadPaths, ['a.txt']);
+  assert.equal(result.compression.rereadCalls, 1);
 });
 
 test('预算参数非法时立即拒绝，不发起模型请求', async () => {

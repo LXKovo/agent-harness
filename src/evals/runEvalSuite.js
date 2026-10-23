@@ -41,7 +41,8 @@ export async function runEvalCase({
     // 用同一个上限去卡「读取 24 个模块」和「写一个文件」，失败只会反映任务大小。
     maxTurns: testCase.maxTurns ?? maxTurns,
     maxDurationMs: testCase.maxDurationMs ?? maxDurationMs,
-    maxContextChars,
+    // 上下文预算也可以按用例压低，用来制造可复现的压缩压力；默认仍是全局值。
+    maxContextChars: testCase.maxContextChars ?? maxContextChars,
   };
 
   try {
@@ -82,6 +83,16 @@ export async function runEvalCase({
   const passed = agentResult?.status === 'completed'
     && checks.length > 0
     && checks.every((check) => check.passed);
+  const events = agentResult?.events ?? [];
+  // 工具调用构成是判断「模型怎么完成任务」的直接证据：
+  // 例如 sweep 任务只读 8 个文件却发了 26 次 search_files，单看通过与否看不出来。
+  const toolCounts = {};
+  for (const event of events) {
+    if (event.type === 'tool') toolCounts[event.name] = (toolCounts[event.name] ?? 0) + 1;
+  }
+  const compression = agentResult?.compression ?? {};
+  const omittedFiles = Array.isArray(compression.omittedPaths) ? compression.omittedPaths.length : 0;
+  const rereadFiles = Array.isArray(compression.rereadPaths) ? compression.rereadPaths.length : 0;
   return {
     id: testCase.id,
     title: testCase.title,
@@ -92,7 +103,18 @@ export async function runEvalCase({
     durationMs: Date.now() - startedAt,
     budget,
     checks,
-    events: agentResult?.events ?? [],
+    // 压缩证据只记计数与比率，具体路径留在事件里，报告不被文件列表淹没
+    compression: {
+      compactionCount: events.filter((event) => event.type === 'context'
+        && event.action === 'compacted').length,
+      omittedFiles,
+      rereadFiles,
+      rereadRate: omittedFiles ? rereadFiles / omittedFiles : null,
+      omittedToolResults: compression.omittedResults ?? 0,
+      rereadCalls: compression.rereadCalls ?? 0,
+    },
+    toolCounts,
+    events,
     workspaceRoot: keepWorkspace ? workspaceRoot : null,
   };
 }

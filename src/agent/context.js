@@ -170,7 +170,11 @@ function shrinkToolContent(message, registry, maxChars) {
  * @param {number} [options.maxToolResultCharsStrict] L2 更严的截断长度
  * @param {number} [options.keepRecentTurns] 保护窗口轮数
  * @param {number} [options.maxDroppedTurns] L3 单次最多丢弃的轮数
- * @returns {{messages: object[], compacted: boolean, actions: Array<{level: number, count: number, savedChars: number}>, estimate: object}}
+ * @returns {{messages: object[], compacted: boolean, actions: Array<{level: number, count: number, savedChars: number}>, estimate: object, omittedCallIds: string[]}}
+ *
+ * `omittedCallIds` 只包含这次压缩新「整条省略」的工具结果（L3 换引用、L4 丢弃），
+ * 不含 L1/L2 截断 —— 截断后模型仍能看到一部分内容，不算完全失去来源。
+ * 运行层据此知道哪些文件的读取结果已经不在上下文里，从而统计模型是否重读。
  */
 export function compactMessages({
   messages,
@@ -198,6 +202,7 @@ export function compactMessages({
     messages: current,
     compacted: false,
     actions: [],
+    omittedCallIds: [],
     estimate: {
       chars: before,
       limit,
@@ -308,6 +313,31 @@ export function compactMessages({
   }
   if (estimateContextChars(working, tools) > maxContextChars) {
     applyLevel(6, truncateToolResults(maxToolResultCharsStrict, true));
+  }
+
+  // 收集这次压缩「整条省略」的工具调用：
+  //   - L3 把结果换成引用，消息还在，但内容已经不可用；
+  //   - L4 把 assistant + tool 整组丢掉，消息直接消失。
+  // 已经在上一次压缩里省略过的调用不计入，否则每次压缩都会把同一批 ID 再报一遍。
+  // L1/L2 的截断结果仍保留部分内容，不算省略。
+  if (working !== current) {
+    const alreadyReferenced = new Set(current
+      .filter((message) => message.role === 'tool'
+        && typeof message.content === 'string' && message.content.startsWith(REFERENCE_MARKER))
+      .map((message) => message.tool_call_id));
+    const present = new Set(working
+      .filter((message) => message.role === 'tool')
+      .map((message) => message.tool_call_id));
+    for (const message of current) {
+      if (message.role !== 'tool' || alreadyReferenced.has(message.tool_call_id)) continue;
+      if (!present.has(message.tool_call_id)) result.omittedCallIds.push(message.tool_call_id);
+    }
+    for (const message of working) {
+      if (message.role !== 'tool' || alreadyReferenced.has(message.tool_call_id)) continue;
+      if (typeof message.content === 'string' && message.content.startsWith(REFERENCE_MARKER)) {
+        result.omittedCallIds.push(message.tool_call_id);
+      }
+    }
   }
 
   result.compacted = working !== current;

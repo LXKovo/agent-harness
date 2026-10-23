@@ -78,6 +78,35 @@ const SHELL_FIXTURE_TEST = [
   '',
 ].join('\n');
 
+/** 跨文件修复夹具：两处错误分别在不同文件，只改一处测试仍然失败 */
+const MULTI_FILE_MATH_BROKEN = [
+  'export function scale(value, factor) {',
+  '  return value + factor;',
+  '}',
+  '',
+].join('\n');
+const MULTI_FILE_MATH_FIXED = MULTI_FILE_MATH_BROKEN.replace('value + factor', 'value * factor');
+const MULTI_FILE_REPORT_BROKEN = [
+  "import { scale } from './math.js';",
+  '',
+  'export function summarize(values, factor) {',
+  '  return values.map((value) => scale(value, factor + 1));',
+  '}',
+  '',
+].join('\n');
+const MULTI_FILE_REPORT_FIXED = MULTI_FILE_REPORT_BROKEN.replace('factor + 1', 'factor');
+const MULTI_FILE_TEST = [
+  "import { test } from 'node:test';",
+  "import assert from 'node:assert/strict';",
+  "import { summarize } from '../src/report.js';",
+  '',
+  "test('summarize scales every value by the factor', () => {",
+  '  assert.deepEqual(summarize([1, 2, 3], 2), [2, 4, 6]);',
+  '  assert.deepEqual(summarize([0, 5], 3), [0, 15]);',
+  '});',
+  '',
+].join('\n');
+
 const SEARCH_PATCH_SETTINGS_BEFORE = [
   'export const settings = {',
   '  featureEnabled: false,',
@@ -376,6 +405,95 @@ export const sweepAuditFixture = {
   maxWeight: SWEEP_MAX.weight,
 };
 
+/**
+ * 收集模型实际发出的 search_files 查询。
+ * search_files 是字面量子串匹配，weight 又恰好是连续数字，因此「查询 4 位以上数字」
+ * 会被当作对权重的前缀探测；这里只读调用参数，不执行任何工具。
+ */
+function searchQueries(agentResult) {
+  const queries = [];
+  for (const message of agentResult?.state?.messages ?? []) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) continue;
+    for (const call of message.tool_calls) {
+      if (call?.function?.name !== 'search_files') continue;
+      try {
+        const query = JSON.parse(call.function.arguments)?.query;
+        if (typeof query === 'string') queries.push(query);
+      } catch {
+        // 参数不合法的调用不会产生检索结果，忽略
+      }
+    }
+  }
+  return queries;
+}
+
+/**
+ * 「必须汇总全部模块」夹具：12 个大型模块，合计越过默认硬预算
+ *
+ * 与 sweep-audit-weights 的区别：那个任务只要求最大值，模型如果先读到最大值所在模块，
+ * 就可能在不读完全部文件的情况下答对；这个任务额外要求全部 weight 的总和，
+ * 只读一部分必然算错。权重是互不相同的 8 位随机值，无法靠「枚举一个小范围再搜索」
+ * 绕过；要得到总和只能逐个读取。审计行仍放在第一行，避免把 L1 截断混进失败原因。
+ *
+ * 12 个模块合计约 130KB，逐个读取必然触发压缩；能否在压缩后保住「最大值 + 累计和」
+ * 正是这个夹具要检验的连续状态。
+ */
+const AGGREGATE_AREAS = ['edge', 'billing', 'search', 'jobs'];
+const AGGREGATE_MODULES_PER_AREA = 3;
+const AGGREGATE_WEIGHTS = [
+  73_184_520, 18_429_376, 92_837_461,
+  45_019_283, 88_172_645, 30_918_274,
+  64_210_953, 27_364_518, 81_927_364,
+  52_018_374, 96_482_731, 69_384_721,
+];
+const AGGREGATE_TOTAL_WEIGHT = AGGREGATE_WEIGHTS.reduce((total, weight) => total + weight, 0);
+
+function buildAggregateFiles() {
+  const files = new Map();
+  let index = 0;
+  for (const area of AGGREGATE_AREAS) {
+    for (let local = 0; local < AGGREGATE_MODULES_PER_AREA; local += 1) {
+      const module = `${area}-${local}.js`;
+      const weight = AGGREGATE_WEIGHTS[index];
+      index += 1;
+      const source = buildLargeModule({
+        name: `${area}${local}`,
+        title: `${area} 区域模块 ${local}`,
+        sections: 40,
+        pad: area[0].toUpperCase(),
+      });
+      files.set(
+        `src/services/${area}/${module}`,
+        `// audit: ${module} ${sweepSeal(module)}${String(weight).padStart(8, '0')}\n${source}`,
+      );
+    }
+  }
+  files.set('README.md', [
+    '# 服务仓库',
+    '',
+    `src/services 下按区域分为 ${AGGREGATE_AREAS.length} 个目录，共 ${AGGREGATE_WEIGHTS.length} 个服务模块。`,
+    '每个模块第一行是一条以 `// audit: ` 开头的审计记录：模块名、一段 300–360 位十六进制封条，',
+    '整行最后 8 个字符是该模块的十进制 weight。',
+    '',
+    '维护约定：审计记录由导出脚本生成，不要手工修改。',
+    '',
+  ].join('\n'));
+  return files;
+}
+
+const AGGREGATE_FILES = buildAggregateFiles();
+const AGGREGATE_MAX_INDEX = AGGREGATE_WEIGHTS.indexOf(Math.max(...AGGREGATE_WEIGHTS));
+const AGGREGATE_MAX_PATH = [...AGGREGATE_FILES.keys()]
+  .filter((path) => path !== 'README.md')[AGGREGATE_MAX_INDEX];
+
+/** 供离线测试与假模型使用 */
+export const aggregateAuditFixture = {
+  modules: [...AGGREGATE_FILES.keys()].filter((path) => path !== 'README.md'),
+  maxPath: AGGREGATE_MAX_PATH,
+  maxWeight: AGGREGATE_WEIGHTS[AGGREGATE_MAX_INDEX],
+  totalWeight: AGGREGATE_TOTAL_WEIGHT,
+};
+
 /** 夹具可能很大，60 个文件逐条检查会把报告和终端淹掉，这里聚合成一条 */
 async function unchangedFiles(workspaceRoot, files) {
   const mismatched = [];
@@ -504,6 +622,44 @@ export const evalCases = [
           detail: usedExecCommand ? '检测到 exec_command 调用' : '没有检测到 exec_command 调用',
         },
         await exactRootEntries(workspaceRoot, ['package.json', 'src', 'test']),
+      ];
+    },
+  },
+  {
+    id: 'repair-cross-file-contract',
+    title: '修复跨两个文件的调用约定',
+    allowShell: true,
+    task: [
+      '这是一个小型 Node.js 项目。读取 src/math.js、src/report.js 与 test/report.test.js，',
+      '找出实现中的两处错误并修复，使 node --test 通过。',
+      '不要修改 package.json 或测试文件，也不要新增文件。',
+      '修改后必须使用 exec_command 运行 node --test，并根据输出确认结果。',
+    ].join(''),
+    async setup({ workspaceRoot }) {
+      await mkdir(join(workspaceRoot, 'src'));
+      await mkdir(join(workspaceRoot, 'test'));
+      await writeFile(join(workspaceRoot, 'package.json'), SHELL_FIXTURE_PACKAGE, 'utf8');
+      await writeFile(join(workspaceRoot, 'src', 'math.js'), MULTI_FILE_MATH_BROKEN, 'utf8');
+      await writeFile(join(workspaceRoot, 'src', 'report.js'), MULTI_FILE_REPORT_BROKEN, 'utf8');
+      await writeFile(join(workspaceRoot, 'test', 'report.test.js'), MULTI_FILE_TEST, 'utf8');
+    },
+    async check({ workspaceRoot, agentResult }) {
+      const usedExecCommand = agentResult?.events.some(
+        (event) => event.type === 'tool' && event.name === 'exec_command',
+      );
+      return [
+        await exactFile(workspaceRoot, 'src/math.js', MULTI_FILE_MATH_FIXED),
+        await exactFile(workspaceRoot, 'src/report.js', MULTI_FILE_REPORT_FIXED),
+        await exactFile(workspaceRoot, 'package.json', SHELL_FIXTURE_PACKAGE),
+        await exactFile(workspaceRoot, 'test/report.test.js', MULTI_FILE_TEST),
+        await nodeTestsPass(workspaceRoot),
+        {
+          name: 'Agent 实际运行了测试',
+          passed: Boolean(usedExecCommand),
+          detail: usedExecCommand ? '检测到 exec_command 调用' : '没有检测到 exec_command 调用',
+        },
+        await exactRootEntries(workspaceRoot, ['package.json', 'src', 'test']),
+        await exactDirectoryEntries(workspaceRoot, 'src', ['math.js', 'report.js']),
       ];
     },
   },
@@ -705,9 +861,11 @@ export const evalCases = [
   {
     id: 'sweep-audit-weights',
     title: '在 24 个大型模块中比对配置权重',
-    // 24 次读取按每轮 4-6 个并发，默认 12 轮不够用。放宽轮数是为了让「上下文」
-    // 而不是「轮数」成为变量：否则失败只能说明轮数太少，得不出任何结论。
-    maxTurns: 16,
+    // 24 个文件、模型实际每轮只并发 1–2 个读取时，最坏情况需要约 24 轮；
+    // 16 轮在 2026-10-23 的 5 次复测里 4 次耗尽（读了 22–25 个文件仍未答完）。
+    // 放宽到 24 轮是为了让「上下文/检索策略」而不是「轮数」成为变量；它仍然是
+    // 有界预算，不是按单次通过结果逐次上调。
+    maxTurns: 24,
     // 参考解法（逐个读取 24 个文件）本机 50–95 秒完成；120 秒的全局上限在模型
     // 多探索几轮时就会先耗尽。240 秒是参考成本 ×3 左右的安全网，只兜慢请求，
     // 不判「快不快」——效率看轮数、工具调用和耗时本身。
@@ -716,6 +874,7 @@ export const evalCases = [
       '这个仓库有 24 个服务模块，按区域分布在 src/services 下。',
       '每个模块开头有一行以 // audit: 开头的单行审计记录：模块名、一段十六进制封条，整行最后 8 个字符是该模块的十进制 weight。',
       '请找出 weight 最大的模块，回答它的文件路径和 weight 值。',
+      '这个任务要求逐个读取；不要用 search_files 检索 4 位以上连续数字来试探 weight。',
       '不要修改现有文件；如果需要记录中间结果，可以新建临时文件。',
     ].join(''),
     async setup({ workspaceRoot }) {
@@ -729,10 +888,10 @@ export const evalCases = [
     },
     async check({ workspaceRoot, agentResult }) {
       const answer = agentResult?.answer ?? '';
-      // 只看结果，不要求「必须读了多少个文件」：旧夹具把 weight 放在可检索的
-      // `"weight":` 字段里，有一轮用 search_files 的「命中 / 未命中」逐位试探出了权重。
-      // 新夹具把 weight 放在行末、去掉可检索键并让封条长度变化，这种试探不再能缩小范围；
-      // 但检查器仍不按策略判分，只核对最终答案和文件是否被改动。
+      // 新夹具把 weight 放在行末、封条长度变化，但 search_files 是字面量子串匹配，
+      // 数字前缀仍能泄漏「该前缀存在」；检查器因此显式拒绝 4 位以上连续数字的检索查询。
+      // 不要求读了多少文件，只核对最终答案、探测行为和文件是否被改动。
+      const numericQueries = searchQueries(agentResult).filter((query) => /\d{4,}/.test(query));
       return [
         {
           name: '回答指出 weight 最大的模块',
@@ -744,7 +903,60 @@ export const evalCases = [
           passed: answer.includes(String(SWEEP_MAX.weight)),
           detail: `期望包含 ${SWEEP_MAX.weight}；回答: ${answer.slice(0, 120)}`,
         },
+        {
+          name: '未使用数字检索探测 weight',
+          passed: numericQueries.length === 0,
+          detail: numericQueries.length
+            ? `检测到数字检索: ${numericQueries.slice(0, 3).map((query) => JSON.stringify(query)).join(', ')}`
+            : '未检测到 4 位以上连续数字检索',
+        },
         await unchangedFiles(workspaceRoot, SWEEP_FILES),
+      ];
+    },
+  },
+  {
+    id: 'aggregate-audit-totals',
+    title: '汇总 12 个大型模块的权重',
+    // 12 个模块、每个约 11KB；逐个读取会触发压缩，轮数预算与 sweep 同量级。
+    maxTurns: 16,
+    maxDurationMs: 240_000,
+    task: [
+      '这个仓库有 12 个服务模块，按区域分布在 src/services 下。',
+      '每个模块第一行是一条以 // audit: 开头的审计记录：模块名、一段十六进制封条，整行最后 8 个字符是该模块的十进制 weight。',
+      '请找出 weight 最大的模块，并计算全部 12 个模块 weight 的总和。',
+      '最终回答必须包含最大 weight 所在文件的路径、该 weight 值，',
+      '并在最后一行原样写出 TOTAL=<总和>，总和只写十进制数字，不要千位分隔符。',
+      '不要修改现有文件；如果需要记录中间结果，可以新建临时文件。',
+    ].join(''),
+    async setup({ workspaceRoot }) {
+      await mkdir(join(workspaceRoot, 'src', 'services'), { recursive: true });
+      for (const area of AGGREGATE_AREAS) {
+        await mkdir(join(workspaceRoot, 'src', 'services', area));
+      }
+      await Promise.all(
+        [...AGGREGATE_FILES].map(([path, content]) => writeFile(join(workspaceRoot, path), content, 'utf8')),
+      );
+    },
+    async check({ workspaceRoot, agentResult }) {
+      const answer = agentResult?.answer ?? '';
+      const total = Number(answer.match(/TOTAL=(\d+)/)?.[1]);
+      return [
+        {
+          name: '回答指出 weight 最大的模块',
+          passed: new RegExp(`${AGGREGATE_MAX_PATH.split('/').at(-1).replace('.', '\\.')}`).test(answer),
+          detail: `期望提到 ${AGGREGATE_MAX_PATH}；回答: ${answer.slice(0, 160)}`,
+        },
+        {
+          name: `回答包含最大权重 ${aggregateAuditFixture.maxWeight}`,
+          passed: answer.includes(String(aggregateAuditFixture.maxWeight)),
+          detail: `期望包含 ${aggregateAuditFixture.maxWeight}；回答: ${answer.slice(0, 160)}`,
+        },
+        {
+          name: `回答包含全部权重之和 ${aggregateAuditFixture.totalWeight}`,
+          passed: total === aggregateAuditFixture.totalWeight,
+          detail: `期望 TOTAL=${aggregateAuditFixture.totalWeight}；回答: ${answer.slice(0, 160)}`,
+        },
+        await unchangedFiles(workspaceRoot, AGGREGATE_FILES),
       ];
     },
   },

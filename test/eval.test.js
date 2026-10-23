@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { access, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { evalCases, selectEvalCases, sweepAuditFixture } from '../src/evals/cases.js';
+import {
+  evalCases, selectEvalCases, sweepAuditFixture, aggregateAuditFixture,
+} from '../src/evals/cases.js';
 import { runEvalSuite } from '../src/evals/runEvalSuite.js';
 import { writeEvalReport } from '../src/evals/report.js';
 
@@ -38,6 +40,7 @@ async function listFiles(root, prefix = '') {
  * 上一轮的最大值带进来，测试就测不到「本轮读到了什么」。
  */
 const sweepSessions = new Map();
+const aggregateSessions = new Map();
 
 function sweepState(task, toolMessages) {
   if (toolMessages.length === 0 || !sweepSessions.has(task)) {
@@ -63,6 +66,36 @@ function createPassingFakeModel() {
     async complete({ messages }) {
       const task = messages.find((message) => message.role === 'user').content;
       const toolMessages = messages.filter((message) => message.role === 'tool');
+
+      if (task.includes('TOTAL=')) {
+        // 汇总任务：逐批读取 12 个模块，把每条的 weight 记在本地状态里。
+        // 压缩可能把旧工具结果换成引用，所以按 call ID 去重，而不是按消息下标。
+        if (toolMessages.length === 0) aggregateSessions.delete(task);
+        if (!aggregateSessions.has(task)) {
+          aggregateSessions.set(task, { requested: 0, weights: new Map(), processed: new Set() });
+        }
+        const state = aggregateSessions.get(task);
+        for (const message of toolMessages) {
+          if (state.processed.has(message.tool_call_id)) continue;
+          state.processed.add(message.tool_call_id);
+          const filePath = message.content.match(/^文件: (.+)$/m)?.[1];
+          const auditLine = message.content.split('\n').find((line) => line.startsWith('// audit: '));
+          const weightText = auditLine?.slice(-8) ?? '';
+          if (filePath && /^\d{8}$/.test(weightText)) state.weights.set(filePath, Number(weightText));
+        }
+        if (state.requested < aggregateAuditFixture.modules.length) {
+          const batch = aggregateAuditFixture.modules.slice(state.requested, state.requested + 4);
+          state.requested += batch.length;
+          return response(batch.map((filePath, index) => (
+            call(`aggregate-${state.requested - batch.length + index}`, 'read_file', { filePath })
+          )));
+        }
+        assert.equal(state.weights.size, aggregateAuditFixture.modules.length, '应读全 12 个模块');
+        const [bestPath, bestWeight] = [...state.weights.entries()]
+          .sort((left, right) => right[1] - left[1])[0];
+        const total = [...state.weights.values()].reduce((sum, weight) => sum + weight, 0);
+        return response([], `最大的是 ${bestPath}，weight=${bestWeight}\nTOTAL=${total}`);
+      }
 
       if (task.includes('weight 最大')) {
         const state = sweepState(task, toolMessages);
@@ -157,6 +190,34 @@ function createPassingFakeModel() {
         }
         assert.match(toolMessages[0].content, /config\/release\.js/);
         return response([], '发布令牌是 W-4471');
+      }
+
+      if (task.includes('src/math.js')) {
+        // 跨文件修复：先读三个文件，再分别打两个补丁，最后跑测试
+        if (toolMessages.length === 0) {
+          return response([
+            call('read-math', 'read_file', { filePath: 'src/math.js' }),
+            call('read-report', 'read_file', { filePath: 'src/report.js' }),
+            call('read-report-test', 'read_file', { filePath: 'test/report.test.js' }),
+          ]);
+        }
+        if (toolMessages.length === 3) {
+          return response([
+            call('fix-math', 'apply_patch', {
+              filePath: 'src/math.js',
+              edits: [{ oldText: '  return value + factor;', newText: '  return value * factor;' }],
+            }),
+            call('fix-report', 'apply_patch', {
+              filePath: 'src/report.js',
+              edits: [{ oldText: 'scale(value, factor + 1)', newText: 'scale(value, factor)' }],
+            }),
+          ]);
+        }
+        if (toolMessages.length === 5) {
+          return response([call('run-tests', 'exec_command', { command: 'node --test' })]);
+        }
+        assert.match(toolMessages.at(-1).content, /命令执行成功/);
+        return response([], '修复完成，测试通过');
       }
 
       if (task.includes('node --test')) {
@@ -282,7 +343,7 @@ test('大面积探索夹具越过上下文预算，目标常量全库唯一', as
 test('通读夹具迫使逐个读取，权重落在检索预览之外', async () => {
   const sweep = evalCases.find((testCase) => testCase.id === 'sweep-audit-weights');
   assert.ok(sweep, '应注册 sweep-audit-weights');
-  assert.equal(sweep.maxTurns, 16, '读取 24 个模块需要比默认 12 轮更宽的轮数预算');
+  assert.equal(sweep.maxTurns, 24, '读取 24 个模块的最坏情况是一轮读一个，需要 24 轮预算');
   assert.equal(sweep.maxDurationMs, 240_000, '这类探索任务的耗时安全网应高于全局 120 秒');
   const root = await mkdtemp(join(tmpdir(), 'agent-harness-fixture-sweep-'));
   try {
@@ -334,6 +395,41 @@ test('通读夹具迫使逐个读取，权重落在检索预览之外', async ()
   }
 });
 
+test('sweep 检查器拒绝数字检索探测 weight', async () => {
+  const sweep = evalCases.find((testCase) => testCase.id === 'sweep-audit-weights');
+  assert.ok(sweep);
+  const root = await mkdtemp(join(tmpdir(), 'agent-harness-fixture-probe-'));
+  try {
+    await sweep.setup({ workspaceRoot: root });
+    const answer = `最大的是 ${sweepAuditFixture.maxPath}，weight=${sweepAuditFixture.maxWeight}`;
+    const probeChecks = await sweep.check({
+      workspaceRoot: root,
+      agentResult: {
+        answer,
+        state: {
+          messages: [{
+            role: 'assistant',
+            content: null,
+            tool_calls: [call('probe', 'search_files', { query: '6421' })],
+          }],
+        },
+      },
+    });
+    const probe = probeChecks.find((check) => check.name.includes('数字检索'));
+    assert.ok(probe, '应包含数字检索检查');
+    assert.equal(probe.passed, false, '数字前缀检索应被判为探测');
+    assert.match(probe.detail, /6421/);
+
+    const cleanChecks = await sweep.check({
+      workspaceRoot: root,
+      agentResult: { answer, state: { messages: [] } },
+    });
+    assert.equal(cleanChecks.find((check) => check.name.includes('数字检索')).passed, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('测评失败由文件检查器决定，不采信模型的完成声明', async () => {
   const model = { complete: async () => response([], '我已经完成') };
   const suite = await runEvalSuite({ cases: [evalCases[0]], model });
@@ -344,10 +440,12 @@ test('测评失败由文件检查器决定，不采信模型的完成声明', as
 
 test('用例可以声明自己的预算，实际生效值会记录在结果里', async () => {
   const model = createPassingFakeModel();
-  const custom = { ...evalCases[0], maxTurns: 5, maxDurationMs: 30_000 };
+  const custom = {
+    ...evalCases[0], maxTurns: 5, maxDurationMs: 30_000, maxContextChars: 40_000,
+  };
   const suite = await runEvalSuite({ cases: [custom], model });
   assert.deepEqual(suite.results[0].budget, {
-    maxTurns: 5, maxDurationMs: 30_000, maxContextChars: 120_000,
+    maxTurns: 5, maxDurationMs: 30_000, maxContextChars: 40_000,
   });
 
   // 没声明预算的用例回落到全局默认，报告里同样能看出它是在什么上限下失败的

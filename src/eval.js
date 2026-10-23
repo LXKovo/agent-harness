@@ -61,6 +61,15 @@ function printSuite(suite, runNumber) {
   for (const result of suite.results) {
     console.log(`${result.passed ? 'PASS' : 'FAIL'} [第 ${runNumber} 轮] ${result.id} — ${result.title}`);
     console.log(`  Agent: ${result.status}，${result.turns} 轮，${result.durationMs}ms`);
+    const tools = Object.entries(result.toolCounts ?? {})
+      .map(([name, count]) => `${name}×${count}`)
+      .join(', ');
+    console.log(`  工具: ${tools || '(无)'}`);
+    if (result.compression?.compactionCount > 0) {
+      const rate = result.compression.rereadRate;
+      console.log(`  压缩: ${result.compression.compactionCount} 次，省略 ${result.compression.omittedFiles} 个文件，`
+        + `重读 ${result.compression.rereadFiles} 个（${rate === null ? '不适用' : `${(rate * 100).toFixed(0)}%`}）`);
+    }
     for (const check of result.checks) {
       console.log(`  ${check.passed ? '✓' : '✗'} ${check.name}: ${check.detail}`);
     }

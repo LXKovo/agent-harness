@@ -140,5 +140,20 @@ export async function runToolBatch({ calls, registry, messages, signal, turn, sa
       outcome: entry.result.code ?? entry.result.status, durationMs: entry.durationMs,
     });
   }
-  return { concurrent, skipped };
+  return {
+    concurrent,
+    skipped,
+    // 调用元数据只含定位信息，不含参数或结果内容；运行层用它把「压缩省略的调用」
+    // 映射回具体文件，并判断之后是否又读了同一个文件。
+    calls: ordered
+      .filter((entry) => !entry.skipped)
+      .map((entry) => ({
+        callId: calls[entry.index].id,
+        name: prepared[entry.index].name,
+        path: typeof prepared[entry.index].args?.filePath === 'string'
+          ? prepared[entry.index].args.filePath
+          : null,
+        status: entry.result.status,
+      })),
+  };
 }
